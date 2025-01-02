@@ -61,32 +61,35 @@ export interface BacktestConfig {
   selectedInstruments: number[];
 }
 
+export interface BacktestTrade {
+  entryTime: string;
+  exitTime: string;
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  pnl: number;
+  pnlPercent: number;
+  exitReason: 'TARGET' | 'STOPLOSS' | 'SIGNAL';
+}
+
 export interface BacktestResult {
-  startDate: string;
-  endDate: string;
+  trades: BacktestTrade[];
   totalTrades: number;
-  winRate: number;
   totalPnL: number;
+  winRate: number;
   maxDrawdown: number;
   averageProfit: number;
   averageLoss: number;
-  sharpeRatio: number;
-  trades: Array<{
+  instrument: {
+    token: number;
     symbol: string;
-    type: 'BUY' | 'SELL';
-    quantity: number;
-    entry_price: number;
-    entry_date: string;
-    exit_price: number;
-    exit_date: string;
-    pnl: number;
-    pnl_percentage: number;
-  }>;
-  summary: {
-    totalTrades: number;
-    profitableTrades: number;
-    totalPnL: number;
-    maxDrawdown: number;
-    winRate: number;
+    exchange: string;
   };
+  strategy: string;
+  timeframe: string;
+  startDate: string;
+  endDate: string;
+  investment: number;
+  profitTarget: number;
+  stopLoss: number;
 } 

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { RootState } from '../store';
 import api from '../services/api';
-import { BacktestConfig, Instrument, AccountDetails as ApiAccountDetails } from '../types/api';
+import { BacktestConfig, Instrument, AccountDetails as ApiAccountDetails, BacktestResult } from '../types/api';
 import { AxiosError } from 'axios';
 import {
   Container,
@@ -29,7 +29,8 @@ import {
   TableBody,
   TableCell,
   TableHead,
-  TableRow
+  TableRow,
+  TablePagination
 } from '@mui/material';
 import InstrumentSearchWrapper from '../components/InstrumentSearchWrapper';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
@@ -95,22 +96,15 @@ interface TabPanelProps {
   value: number;
 }
 
-interface BacktestTrade {
-  entryTime: string;
-  exitTime: string;
-  entryPrice: number;
-  exitPrice: number;
-  quantity: number;
-  pnl: number;
-  pnlPercent: number;
-  exitReason: 'TARGET' | 'STOPLOSS' | 'SIGNAL';
+interface BacktestPagination {
+  total: number;
+  page: number;
+  pages: number;
 }
 
-interface BacktestResult {
-  trades: BacktestTrade[];
-  totalTrades: number;
-  totalPnL: number;
-  winRate: number;
+interface BacktestResultsResponse {
+  results: BacktestResult[];
+  pagination: BacktestPagination;
 }
 
 function CustomTabPanel(props: TabPanelProps) {
@@ -222,6 +216,9 @@ const Trade: React.FC = () => {
     total_pnl: 0,
     total_pnl_percentage: 0
   });
+  const [backtestPage, setBacktestPage] = useState(1);
+  const [backtestTotal, setBacktestTotal] = useState(0);
+  const [loadingBacktests, setLoadingBacktests] = useState(false);
 
   // Add this helper function for date validation
   const isWeekend = (date: Date): boolean => {
@@ -308,7 +305,61 @@ const Trade: React.FC = () => {
     }
   };
 
-  // Update handleBacktest to store simulated trades
+  // Add function to load backtest results
+  const loadBacktestResults = useCallback(async (page: number) => {
+    setLoadingBacktests(true);
+    try {
+      const response = await api.get<BacktestResultsResponse>(`/backtest/results?page=${page}&limit=20`);
+      
+      // Transform backtest results into Trade format for display
+      const simulatedTradesList = response.data.results.flatMap(result => 
+        result.trades.map(trade => ({
+          instrument_token: result.instrument.token,
+          order_id: `SIM_${Math.random().toString(36).substring(7)}`,
+          tradingsymbol: result.instrument.symbol,
+          exchange: result.instrument.exchange,
+          transaction_type: 'BUY' as const,
+          quantity: trade.quantity,
+          average_price: trade.entryPrice,
+          product: 'SIM',
+          status: 'COMPLETE',
+          order_timestamp: trade.entryTime,
+          ltp: trade.exitPrice,
+          pnl: trade.pnl,
+          pnl_percentage: trade.pnlPercent,
+          trade_type: 'AUTO' as const,
+          is_open: false
+        }))
+      );
+
+      setSimulatedTrades(simulatedTradesList);
+      setBacktestPage(response.data.pagination.page);
+      setBacktestTotal(response.data.pagination.total);
+      
+      // Calculate simulated trade summary
+      const simSummary = calculateTradeSummary(simulatedTradesList);
+      setSimulatedTradeSummary(simSummary);
+    } catch (error) {
+      console.error('Error loading backtest results:', error);
+      setError('Failed to load backtest results');
+    } finally {
+      setLoadingBacktests(false);
+    }
+  }, []);
+
+  // Load backtest results when tab changes to simulated trades
+  useEffect(() => {
+    if (tabValue === 1) {
+      loadBacktestResults(1);
+    }
+  }, [tabValue, loadBacktestResults]);
+
+  // Handle page change
+  const handleBacktestPageChange = (event: unknown, newPage: number) => {
+    loadBacktestResults(newPage + 1);
+  };
+
+  // Update handleBacktest to load results after successful backtest
   const handleBacktest = async () => {
     if (!selectedInstrument || !isValidForBacktest) {
       setError('Please fill all required fields');
@@ -351,38 +402,8 @@ const Trade: React.FC = () => {
       const results = await api.post<BacktestResult>('/backtest', config);
       console.log('Backtest results:', results.data);
       
-      // Transform backtest results into Trade format
-      const simulatedTradesList = results.data.trades.map((trade: BacktestTrade) => ({
-        instrument_token: selectedInstrument?.instrument_token || 0,
-        order_id: `SIM_${Math.random().toString(36).substring(7)}`,
-        tradingsymbol: selectedInstrument?.tradingsymbol || '',
-        exchange: selectedInstrument?.exchange || '',
-        transaction_type: 'BUY' as const,
-        quantity: trade.quantity,
-        average_price: trade.entryPrice,
-        product: 'SIM',
-        status: 'COMPLETE',
-        order_timestamp: trade.entryTime,
-        ltp: trade.exitPrice,
-        pnl: trade.pnl,
-        pnl_percentage: trade.pnlPercent,
-        trade_type: 'AUTO' as const,
-        is_open: false
-      }));
-
-      setSimulatedTrades(simulatedTradesList);
-      
-      // Calculate simulated trade summary
-      const simSummary = {
-        total_trades: results.data.totalTrades,
-        open_trades: 0,
-        closed_trades: results.data.totalTrades,
-        manual_trades: 0,
-        auto_trades: results.data.totalTrades,
-        total_pnl: results.data.totalPnL,
-        total_pnl_percentage: results.data.winRate
-      };
-      setSimulatedTradeSummary(simSummary);
+      // After successful backtest, load the first page of results
+      await loadBacktestResults(1);
       
       // Switch to simulated trades tab
       setTabValue(1);
@@ -1501,37 +1522,36 @@ const Trade: React.FC = () => {
 
             {/* Simulated Trades Tab */}
             <CustomTabPanel value={tabValue} index={1}>
-              <Grid container spacing={2}>
-                {/* Simulated Trade Summary */}
-                <Grid item xs={12}>
-                  <Paper sx={{ p: 2, bgcolor: 'background.default' }}>
-                    <Typography variant="h6" gutterBottom>Simulated Trade Summary</Typography>
-                    <Grid container spacing={2}>
-                      <Grid item xs={6} sm={3}>
-                        <Typography variant="body2" color="text.secondary">Total Trades</Typography>
-                        <Typography variant="h6">{simulatedTradeSummary.total_trades}</Typography>
+              <Box sx={{ width: '100%' }}>
+                <Typography variant="h6" gutterBottom>
+                  Simulated Trades
+                </Typography>
+                {loadingBacktests ? (
+                  <CircularProgress />
+                ) : (
+                  <>
+                    <Paper sx={{ p: 2, mb: 2, bgcolor: 'background.default' }}>
+                      <Grid container spacing={2}>
+                        <Grid item xs={6} sm={3}>
+                          <Typography variant="body2" color="text.secondary">Total Trades</Typography>
+                          <Typography variant="h6">{simulatedTradeSummary.total_trades}</Typography>
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Typography variant="body2" color="text.secondary">Win Rate</Typography>
+                          <Typography variant="h6">{simulatedTradeSummary.total_pnl_percentage.toFixed(2)}%</Typography>
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Typography variant="body2" color="text.secondary">Total P&L</Typography>
+                          <Typography variant="h6" color={simulatedTradeSummary.total_pnl >= 0 ? 'success.main' : 'error.main'}>
+                            ₹{simulatedTradeSummary.total_pnl.toFixed(2)}
+                          </Typography>
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Typography variant="body2" color="text.secondary">Auto Trades</Typography>
+                          <Typography variant="h6">{simulatedTradeSummary.auto_trades}</Typography>
+                        </Grid>
                       </Grid>
-                      <Grid item xs={6} sm={3}>
-                        <Typography variant="body2" color="text.secondary">Win Rate</Typography>
-                        <Typography variant="h6">{simulatedTradeSummary.total_pnl_percentage.toFixed(2)}%</Typography>
-                      </Grid>
-                      <Grid item xs={6} sm={3}>
-                        <Typography variant="body2" color="text.secondary">Total P&L</Typography>
-                        <Typography variant="h6" color={simulatedTradeSummary.total_pnl >= 0 ? 'success.main' : 'error.main'}>
-                          ₹{simulatedTradeSummary.total_pnl.toFixed(2)}
-                        </Typography>
-                      </Grid>
-                      <Grid item xs={6} sm={3}>
-                        <Typography variant="body2" color="text.secondary">Auto Trades</Typography>
-                        <Typography variant="h6">{simulatedTradeSummary.auto_trades}</Typography>
-                      </Grid>
-                    </Grid>
-                  </Paper>
-                </Grid>
-
-                {/* Simulated Trades List */}
-                <Grid item xs={12}>
-                  <Box sx={{ overflowX: 'auto' }}>
+                    </Paper>
                     <Table>
                       <TableHead>
                         <TableRow>
@@ -1542,6 +1562,7 @@ const Trade: React.FC = () => {
                           <TableCell>Exit Price</TableCell>
                           <TableCell>P&L</TableCell>
                           <TableCell>P&L %</TableCell>
+                          <TableCell>Time</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -1550,25 +1571,40 @@ const Trade: React.FC = () => {
                             <TableCell>{trade.tradingsymbol}</TableCell>
                             <TableCell>{trade.transaction_type}</TableCell>
                             <TableCell>{trade.quantity}</TableCell>
-                            <TableCell>₹{trade.average_price.toFixed(2)}</TableCell>
-                            <TableCell>₹{trade.ltp.toFixed(2)}</TableCell>
-                            <TableCell>
-                              <Typography color={trade.pnl >= 0 ? 'success.main' : 'error.main'}>
-                                ₹{trade.pnl.toFixed(2)}
-                              </Typography>
+                            <TableCell>{trade.average_price.toFixed(2)}</TableCell>
+                            <TableCell>{trade.ltp.toFixed(2)}</TableCell>
+                            <TableCell 
+                              sx={{ 
+                                color: trade.pnl >= 0 ? 'success.main' : 'error.main' 
+                              }}
+                            >
+                              {trade.pnl.toFixed(2)}
+                            </TableCell>
+                            <TableCell
+                              sx={{
+                                color: trade.pnl_percentage >= 0 ? 'success.main' : 'error.main'
+                              }}
+                            >
+                              {trade.pnl_percentage.toFixed(2)}%
                             </TableCell>
                             <TableCell>
-                              <Typography color={trade.pnl_percentage >= 0 ? 'success.main' : 'error.main'}>
-                                {trade.pnl_percentage.toFixed(2)}%
-                              </Typography>
+                              {new Date(trade.order_timestamp).toLocaleString()}
                             </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
                     </Table>
-                  </Box>
-                </Grid>
-              </Grid>
+                    <TablePagination
+                      component="div"
+                      count={backtestTotal}
+                      page={backtestPage - 1}
+                      onPageChange={handleBacktestPageChange}
+                      rowsPerPage={20}
+                      rowsPerPageOptions={[20]}
+                    />
+                  </>
+                )}
+              </Box>
             </CustomTabPanel>
           </Paper>
         </Grid>

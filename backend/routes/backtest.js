@@ -3,6 +3,8 @@ const router = express.Router();
 const KiteConnect = require('kiteconnect').KiteConnect;
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const BacktestResult = require('../models/BacktestResult');
+const technicalIndicators = require('technicalindicators');
 
 // Middleware to verify JWT token and attach user to request
 const authenticateJWT = async (req, res, next) => {
@@ -51,6 +53,34 @@ router.get('/instruments', authenticateJWT, async (req, res) => {
   } catch (error) {
     console.error('Error fetching instruments:', error);
     res.status(500).json({ error: 'Failed to fetch instruments' });
+  }
+});
+
+// Add endpoint to get paginated backtest results
+router.get('/results', authenticateJWT, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    const results = await BacktestResult.find({ user: req.user._id })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await BacktestResult.countDocuments({ user: req.user._id });
+
+    res.json({
+      results,
+      pagination: {
+        total,
+        page,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching backtest results:', error);
+    res.status(500).json({ error: 'Failed to fetch backtest results' });
   }
 });
 
@@ -237,7 +267,7 @@ router.post('/', authenticateJWT, async (req, res) => {
       totalTrades: 0,
       winRate: 0,
       totalPnL: 0,
-      maxDrawdown: 0,  // Initialize to 0
+      maxDrawdown: 0,
       averageProfit: 0,
       averageLoss: 0,
       sharpeRatio: 0,
@@ -350,7 +380,7 @@ router.post('/', authenticateJWT, async (req, res) => {
             if (position) {
               const pnlPercent = ((candle.close - position.entryPrice) / position.entryPrice) * 100;
               
-              if (pnlPercent >= profitTarget || pnlPercent <= -stopLoss || signals.sell) {
+              if (pnlPercent >= signals.profitTarget || pnlPercent <= -signals.stopLoss || signals.sell) {
                 const pnl = (candle.close - position.entryPrice) * position.quantity;
                 runningPnL += pnl;
                 
@@ -374,8 +404,8 @@ router.post('/', authenticateJWT, async (req, res) => {
                   quantity: position.quantity,
                   pnl,
                   pnlPercent,
-                  exitReason: pnlPercent >= profitTarget ? 'TARGET' : 
-                             pnlPercent <= -stopLoss ? 'STOPLOSS' : 
+                  exitReason: pnlPercent >= signals.profitTarget ? 'TARGET' : 
+                             pnlPercent <= -signals.stopLoss ? 'STOPLOSS' : 
                              'SIGNAL'
                 });
 
@@ -403,17 +433,41 @@ router.post('/', authenticateJWT, async (req, res) => {
 
     // Calculate final statistics
     console.log(`[Backtest ${requestId}] Calculating final statistics`);
-    result.totalTrades = result.trades.length;
-    const profitableTrades = result.trades.filter(t => t.pnl > 0);
-    result.winRate = result.totalTrades > 0 ? (profitableTrades.length / result.totalTrades) * 100 : 0;
-    result.totalPnL = result.trades.reduce((sum, t) => sum + t.pnl, 0);
-    result.maxDrawdown = globalMaxDrawdown;  // Use the tracked global max drawdown
-
-    const profits = result.trades.filter(t => t.pnl > 0).map(t => t.pnl);
-    const losses = result.trades.filter(t => t.pnl < 0).map(t => t.pnl);
     
-    result.averageProfit = profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
-    result.averageLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
+    // Fetch instrument details for saving
+    const instrumentDetails = await kite.getInstruments(['NSE']);
+    const selectedInstrument = instrumentDetails.find(i => i.instrument_token === selectedInstruments[0]);
+    
+    if (!selectedInstrument) {
+      console.log(`[Backtest ${requestId}] Error: Instrument not found`);
+      return res.status(400).json({ error: 'Selected instrument not found' });
+    }
+
+    const backtestResult = new BacktestResult({
+      user: req.user._id,
+      strategy,
+      timeframe,
+      startDate: fromStr,
+      endDate: toStr,
+      investment,
+      profitTarget,
+      stopLoss,
+      instrument: {
+        token: selectedInstruments[0],
+        symbol: selectedInstrument.tradingsymbol,
+        exchange: selectedInstrument.exchange
+      },
+      totalTrades: result.totalTrades,
+      winRate: result.winRate,
+      totalPnL: result.totalPnL,
+      maxDrawdown: result.maxDrawdown,
+      averageProfit: result.averageProfit,
+      averageLoss: result.averageLoss,
+      trades: result.trades
+    });
+
+    await backtestResult.save();
+    console.log(`[Backtest ${requestId}] Result saved to database with ID:`, backtestResult._id);
 
     console.log(`[Backtest ${requestId}] Backtest completed successfully`);
     console.log(`[Backtest ${requestId}] Final result:`, JSON.stringify(result, null, 2));
@@ -427,7 +481,11 @@ router.post('/', authenticateJWT, async (req, res) => {
 
 // Helper function to calculate strategy signals
 function calculateSignals(strategy, candle, prevCandles) {
-  const ltp = candle.close; // Use close price as LTP for historical data
+  const ltp = candle.close;
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const highs = [...prevCandles.map(c => c.high), candle.high];
+  const lows = [...prevCandles.map(c => c.low), candle.low];
+  const volumes = [...prevCandles.map(c => c.volume), candle.volume];
   
   switch (strategy) {
     case 'MovingAverage':
@@ -436,8 +494,24 @@ function calculateSignals(strategy, candle, prevCandles) {
       return calculateRSISignals(ltp, prevCandles);
     case 'MACD':
       return calculateMACDSignals(ltp, prevCandles);
+    case 'BollingerBands':
+      return calculateBollingerBandsSignals(ltp, prevCandles);
+    case 'Supertrend':
+      return calculateSupertrendSignals(candle, prevCandles);
+    case 'EnhancedRSI':
+      return calculateEnhancedRSISignals(ltp, prevCandles);
+    case 'VolumeWeighted':
+      return calculateVolumeWeightedSignals(candle, prevCandles);
+    case 'StochRSI':
+      return calculateStochRSISignals(prices);
+    case 'ADX':
+      return calculateADXSignals(highs, lows, prices);
+    case 'IchimokuCloud':
+      return calculateIchimokuSignals(highs, lows, prices);
+    case 'PSAR':
+      return calculatePSARSignals(highs, lows, prices);
     default:
-      return { buy: false, sell: false };
+      return { buy: false, sell: false, profitTarget: null, stopLoss: null };
   }
 }
 
@@ -454,7 +528,12 @@ function calculateMovingAverageSignals(ltp, prevCandles) {
   const sell = sma20 < sma50 && 
     calculateSMA(prices.slice(0, -1), 20) >= calculateSMA(prices.slice(0, -1), 50);
   
-  return { buy, sell };
+  // Dynamic targets based on MA spread
+  const spread = Math.abs(sma20 - sma50);
+  const profitTarget = (spread / ltp) * 200; // 2x the MA spread
+  const stopLoss = (spread / ltp) * 100; // 1x the MA spread
+  
+  return { buy, sell, profitTarget, stopLoss };
 }
 
 function calculateRSISignals(ltp, prevCandles) {
@@ -467,7 +546,11 @@ function calculateRSISignals(ltp, prevCandles) {
   // Sell when RSI crosses below overbought level (70)
   const sell = rsi < 70 && calculateRSI(prices.slice(0, -1), 14) >= 70;
   
-  return { buy, sell };
+  // Dynamic targets based on RSI extremes
+  const profitTarget = rsi < 30 ? 2.5 : (100 - rsi) / 10;
+  const stopLoss = rsi < 30 ? 1.2 : (100 - rsi) / 20;
+  
+  return { buy, sell, profitTarget, stopLoss };
 }
 
 function calculateMACDSignals(ltp, prevCandles) {
@@ -482,7 +565,137 @@ function calculateMACDSignals(ltp, prevCandles) {
   const sell = macd < signal && 
     calculateMACD(prices.slice(0, -1)).macd >= calculateMACD(prices.slice(0, -1)).signal;
   
-  return { buy, sell };
+  // Dynamic targets based on MACD histogram
+  const histogram = Math.abs(macd - signal);
+  const profitTarget = Math.max(1.5, (histogram / ltp) * 200);
+  const stopLoss = Math.min(1, (histogram / ltp) * 100);
+  
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateBollingerBandsSignals(ltp, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const period = 20;
+  const stdDev = 2;
+  
+  const sma = calculateSMA(prices, period);
+  const standardDeviation = calculateStandardDeviation(prices.slice(-period));
+  
+  const upperBand = sma + (standardDeviation * stdDev);
+  const lowerBand = sma - (standardDeviation * stdDev);
+  
+  // Buy when price crosses below lower band
+  const buy = ltp <= lowerBand && prevCandles[prevCandles.length-1].close > lowerBand;
+  
+  // Sell when price crosses above upper band
+  const sell = ltp >= upperBand && prevCandles[prevCandles.length-1].close < upperBand;
+  
+  // Dynamic targets based on band width
+  const bandWidth = upperBand - lowerBand;
+  const profitTarget = (bandWidth / ltp) * 100; // Use band width for profit target
+  const stopLoss = (bandWidth / 2 / ltp) * 100; // Half band width for stop loss
+  
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateSupertrendSignals(candle, prevCandles) {
+  const period = 10;
+  const multiplier = 3;
+  const atr = calculateATR([...prevCandles, candle], period);
+  
+  const basicUpperBand = (candle.high + candle.low) / 2 + multiplier * atr;
+  const basicLowerBand = (candle.high + candle.low) / 2 - multiplier * atr;
+  
+  const prevClose = prevCandles[prevCandles.length-1].close;
+  const prevHigh = prevCandles[prevCandles.length-1].high;
+  const prevLow = prevCandles[prevCandles.length-1].low;
+  
+  // Trend determination
+  const uptrend = candle.close > basicUpperBand;
+  const prevUptrend = prevClose > ((prevHigh + prevLow) / 2 + multiplier * atr);
+  
+  const buy = uptrend && !prevUptrend;
+  const sell = !uptrend && prevUptrend;
+  
+  // Dynamic targets based on ATR
+  const profitTarget = (atr * 3 / candle.close) * 100;
+  const stopLoss = (atr * 1.5 / candle.close) * 100;
+  
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateEnhancedRSISignals(ltp, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const rsi = calculateRSI(prices, 14);
+  const prevRSI = calculateRSI(prices.slice(0, -1), 14);
+  
+  // Enhanced entry conditions
+  const buy = (rsi < 30 && prevRSI >= 30) || // Oversold condition
+             (rsi > 30 && prevRSI <= 30 && calculateSMA(prices, 20) > calculateSMA(prices, 50)); // RSI crosses up with trend
+             
+  const sell = (rsi > 70 && prevRSI <= 70) || // Overbought condition
+               (rsi < 70 && prevRSI >= 70 && calculateSMA(prices, 20) < calculateSMA(prices, 50)); // RSI crosses down with trend
+  
+  // Dynamic targets based on RSI value
+  const profitTarget = rsi < 30 ? 2 * (30 - rsi) : 1.5;
+  const stopLoss = rsi < 30 ? (30 - rsi) / 2 : 1;
+  
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateVolumeWeightedSignals(candle, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), candle.close];
+  const volumes = [...prevCandles.map(c => c.volume), candle.volume];
+  
+  const vwap = calculateVWAP(prices, volumes);
+  const prevVWAP = calculateVWAP(prices.slice(0, -1), volumes.slice(0, -1));
+  
+  // Volume surge detection
+  const avgVolume = calculateSMA(volumes.slice(-20), 20);
+  const volumeSurge = candle.volume > avgVolume * 1.5;
+  
+  // Price momentum
+  const momentum = (candle.close - prevCandles[prevCandles.length-1].close) / prevCandles[prevCandles.length-1].close;
+  
+  const buy = candle.close > vwap && volumeSurge && momentum > 0;
+  const sell = candle.close < vwap && volumeSurge && momentum < 0;
+  
+  // Dynamic targets based on volume and momentum
+  const volatility = calculateStandardDeviation(prices.slice(-20)) / calculateSMA(prices.slice(-20), 20);
+  const profitTarget = Math.max(1.5, volatility * 100 * 2);
+  const stopLoss = Math.min(1, volatility * 100);
+  
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateStandardDeviation(prices) {
+  const mean = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+  const squaredDiffs = prices.map(price => Math.pow(price - mean, 2));
+  const variance = squaredDiffs.reduce((sum, diff) => sum + diff, 0) / prices.length;
+  return Math.sqrt(variance);
+}
+
+function calculateATR(candles, period) {
+  const trs = candles.map((candle, i) => {
+    if (i === 0) return candle.high - candle.low;
+    
+    const prevClose = candles[i-1].close;
+    const tr = Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - prevClose),
+      Math.abs(candle.low - prevClose)
+    );
+    return tr;
+  });
+  
+  return calculateSMA(trs.slice(-period), period);
+}
+
+function calculateVWAP(prices, volumes) {
+  const typicalPrices = prices.map((price, i) => price * volumes[i]);
+  const sumTypicalPrices = typicalPrices.reduce((sum, tp) => sum + tp, 0);
+  const sumVolumes = volumes.reduce((sum, vol) => sum + vol, 0);
+  return sumTypicalPrices / sumVolumes;
 }
 
 // Helper functions for technical indicators
@@ -535,6 +748,113 @@ function calculateEMA(prices, period) {
   }
   
   return ema;
+}
+
+function calculateStochRSISignals(prices) {
+  const period = 14;
+  const stochRSI = technicalIndicators.StochasticRSI.calculate({
+    values: prices,
+    rsiPeriod: period,
+    stochasticPeriod: period,
+    kPeriod: 3,
+    dPeriod: 3
+  });
+
+  const current = stochRSI[stochRSI.length - 1];
+  const previous = stochRSI[stochRSI.length - 2];
+
+  // Buy when K line crosses above D line in oversold territory
+  const buy = current.k > current.d && previous.k <= previous.d && current.k < 20;
+  
+  // Sell when K line crosses below D line in overbought territory
+  const sell = current.k < current.d && previous.k >= previous.d && current.k > 80;
+
+  // Dynamic targets based on StochRSI values
+  const profitTarget = (100 - current.k) / 20; // Higher target when oversold
+  const stopLoss = current.k / 40; // Tighter stop when overbought
+
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateADXSignals(highs, lows, prices) {
+  const period = 14;
+  const adx = technicalIndicators.ADX.calculate({
+    high: highs,
+    low: lows,
+    close: prices,
+    period
+  });
+
+  const current = adx[adx.length - 1];
+  const previous = adx[adx.length - 2];
+
+  // Buy when ADX is rising and above 25 (strong trend)
+  const buy = current.adx > 25 && current.adx > previous.adx && current.pdi > current.mdi;
+  
+  // Sell when ADX is falling or PDI crosses below MDI
+  const sell = (current.adx < previous.adx && current.adx > 25) || (current.pdi < current.mdi);
+
+  // Dynamic targets based on trend strength
+  const profitTarget = current.adx / 10;
+  const stopLoss = current.adx / 20;
+
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculateIchimokuSignals(highs, lows, prices) {
+  const ichimoku = technicalIndicators.IchimokuCloud.calculate({
+    high: highs,
+    low: lows,
+    conversionPeriod: 9,
+    basePeriod: 26,
+    spanPeriod: 52,
+    displacement: 26
+  });
+
+  const current = ichimoku[ichimoku.length - 1];
+  const price = prices[prices.length - 1];
+
+  // Buy when price crosses above the cloud and conversion line crosses base line
+  const buy = price > current.spanA && price > current.spanB && 
+              current.conversion > current.base;
+
+  // Sell when price crosses below the cloud and conversion line crosses below base line
+  const sell = price < current.spanA && price < current.spanB && 
+               current.conversion < current.base;
+
+  // Dynamic targets based on cloud thickness
+  const cloudThickness = Math.abs(current.spanA - current.spanB);
+  const profitTarget = (cloudThickness / price) * 200;
+  const stopLoss = (cloudThickness / price) * 100;
+
+  return { buy, sell, profitTarget, stopLoss };
+}
+
+function calculatePSARSignals(highs, lows, prices) {
+  const psar = technicalIndicators.PSAR.calculate({
+    high: highs,
+    low: lows,
+    step: 0.02,
+    max: 0.2
+  });
+
+  const current = psar[psar.length - 1];
+  const price = prices[prices.length - 1];
+  const prevPrice = prices[prices.length - 2];
+  const prevPSAR = psar[psar.length - 2];
+
+  // Buy when price crosses above PSAR
+  const buy = price > current && prevPrice <= prevPSAR;
+  
+  // Sell when price crosses below PSAR
+  const sell = price < current && prevPrice >= prevPSAR;
+
+  // Dynamic targets based on price movement
+  const atr = calculateATR([...highs], [...lows], [...prices], 14);
+  const profitTarget = (atr / price) * 300;
+  const stopLoss = (atr / price) * 150;
+
+  return { buy, sell, profitTarget, stopLoss };
 }
 
 module.exports = router; 
