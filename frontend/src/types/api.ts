@@ -49,16 +49,16 @@ export interface Instrument {
 }
 
 export interface BacktestConfig {
-  instrument: Instrument;
+  mode: 'realtime' | 'simulation';
+  strategy: string;
+  timeframe: string;
   startDate: string;
   endDate: string;
-  capital: number;
-  strategy: string;
-  params: {
-    profitTarget: number;
-    stopLoss: number;
-    timeframe: string;
-  };
+  investment: number;
+  profitTarget: number;
+  stopLoss: number;
+  simulationAmount: number;
+  selectedInstruments: number[];
 }
 
 export interface BacktestResult {

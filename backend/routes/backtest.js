@@ -103,42 +103,116 @@ router.post('/', authenticateJWT, async (req, res) => {
     const from = new Date(startDate);
     const to = new Date(endDate);
     
-    // Set time to start of day for 'from' and end of day for 'to'
-    from.setHours(9, 15, 0, 0);  // Market opening time
-    to.setHours(15, 30, 0, 0);   // Market closing time
+    console.log(`[Backtest ${requestId}] Raw dates before validation:`, {
+      from: from.toISOString(),
+      to: to.toISOString()
+    });
+
+    // Basic date validation
+    if (from > to) {
+      console.log(`[Backtest ${requestId}] Error: Start date is after end date`);
+      return res.status(400).json({ 
+        error: 'Start date cannot be after end date'
+      });
+    }
+
+    // Get current date in IST
+    const now = new Date();
+    const currentYear = now.getFullYear();
     
-    // Format dates for Kite API (yyyy-mm-dd HH:mm:ss)
+    // Force dates to be in current year or past
+    if (from.getFullYear() > currentYear) {
+      from.setFullYear(currentYear);
+    }
+    if (to.getFullYear() > currentYear) {
+      to.setFullYear(currentYear);
+    }
+    
+    // Calculate the valid date range
+    const maxDate = new Date(now);
+    maxDate.setHours(15, 30, 0, 0); // Set to market closing time
+    if (now.getHours() < 15 || (now.getHours() === 15 && now.getMinutes() < 30)) {
+      maxDate.setDate(maxDate.getDate() - 1); // Use previous day if before market close
+    }
+    
+    // Skip weekends for max date
+    while (maxDate.getDay() === 0 || maxDate.getDay() === 6) {
+      maxDate.setDate(maxDate.getDate() - 1);
+    }
+    
+    // Calculate minimum date (60 days before max date)
+    const minDate = new Date(maxDate);
+    minDate.setDate(minDate.getDate() - 60);
+    minDate.setHours(9, 15, 0, 0); // Set to market opening time
+    
+    // Skip weekends for min date
+    while (minDate.getDay() === 0 || minDate.getDay() === 6) {
+      minDate.setDate(minDate.getDate() + 1);
+    }
+    
+    console.log(`[Backtest ${requestId}] Date range validation:`, {
+      selectedStart: from.toISOString(),
+      selectedEnd: to.toISOString(),
+      maxAllowedDate: maxDate.toISOString(),
+      minAllowedDate: minDate.toISOString()
+    });
+
+    // Validate date range
+    if (from < minDate || from > maxDate) {
+      console.log(`[Backtest ${requestId}] Error: Start date out of range`);
+      return res.status(400).json({ 
+        error: `Start date must be between ${minDate.toISOString().split('T')[0]} and ${maxDate.toISOString().split('T')[0]}`
+      });
+    }
+
+    if (to < minDate || to > maxDate) {
+      console.log(`[Backtest ${requestId}] Error: End date out of range`);
+      return res.status(400).json({ 
+        error: `End date must be between ${minDate.toISOString().split('T')[0]} and ${maxDate.toISOString().split('T')[0]}`
+      });
+    }
+
+    // Format dates for Kite API (yyyy-mm-dd hh:mm:ss)
     const formatDateForKite = (date) => {
       const pad = (num) => String(num).padStart(2, '0');
-      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+      
+      // Extract date components
+      const year = date.getFullYear();
+      const month = pad(date.getMonth() + 1);
+      const day = pad(date.getDate());
+      
+      // Always use market hours
+      const isFromDate = date.getTime() === from.getTime();
+      const hours = isFromDate ? '09' : '15';
+      const minutes = isFromDate ? '15' : '30';
+      const seconds = '00';
+      
+      // Return in exact Kite format: yyyy-mm-dd hh:mm:ss
+      return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     };
-    
-    // Validate dates
-    const now = new Date();
-    const sixtyDaysAgo = new Date(now.getTime() - (60 * 24 * 60 * 60 * 1000));
-    
-    if (from > now || to > now) {
-      console.log(`[Backtest ${requestId}] Error: Cannot use future dates`);
-      return res.status(400).json({ error: 'Cannot use future dates for backtest' });
-    }
-    
-    if (from < sixtyDaysAgo) {
-      console.log(`[Backtest ${requestId}] Error: Historical data only available for last 60 days`);
-      return res.status(400).json({ error: 'Historical data only available for last 60 days' });
-    }
-    
+
+    // Format dates with market hours
     const fromStr = formatDateForKite(from);
     const toStr = formatDateForKite(to);
     
-    console.log(`[Backtest ${requestId}] Raw dates:`, { startDate, endDate });
-    console.log(`[Backtest ${requestId}] Formatted dates for Kite:`, { fromStr, toStr });
-    console.log(`[Backtest ${requestId}] Parsed dates:`, { 
-      from: from.toISOString(),
-      to: to.toISOString(),
-      fromTimestamp: from.getTime(),
-      toTimestamp: to.getTime(),
-      durationDays: Math.floor((to - from) / (1000 * 60 * 60 * 24))
+    console.log(`[Backtest ${requestId}] Validated and formatted dates:`, { 
+      fromStr,
+      toStr,
+      maxDate: formatDateForKite(maxDate),
+      minDate: formatDateForKite(minDate)
     });
+
+    // Additional validation for future years
+    if (from.getFullYear() > new Date().getFullYear() || to.getFullYear() > new Date().getFullYear()) {
+      console.log(`[Backtest ${requestId}] Error: Dates cannot be in future years`, {
+        fromYear: from.getFullYear(),
+        toYear: to.getFullYear(),
+        currentYear: new Date().getFullYear()
+      });
+      return res.status(400).json({ 
+        error: 'Dates cannot be in future years. Please select dates from the current year or past.'
+      });
+    }
 
     // Map timeframe to Kite interval
     const intervalMap = {
@@ -146,19 +220,24 @@ router.post('/', authenticateJWT, async (req, res) => {
       '5minute': '5minute',
       '15minute': '15minute',
       '30minute': '30minute',
-      '60minute': '60minute'
+      '60minute': '60minute',
+      'day': 'day'
     };
     
-    const interval = intervalMap[timeframe] || '5minute';
-    console.log(`[Backtest ${requestId}] Using interval:`, interval);
+    const interval = intervalMap[timeframe];
+    if (!interval) {
+      console.log(`[Backtest ${requestId}] Error: Invalid timeframe ${timeframe}`);
+      return res.status(400).json({ error: 'Invalid timeframe' });
+    }
 
+    // Initialize result object with default values
     const result = {
-      startDate: from.toISOString(),
-      endDate: to.toISOString(),
+      startDate: fromStr,
+      endDate: toStr,
       totalTrades: 0,
       winRate: 0,
       totalPnL: 0,
-      maxDrawdown: 0,
+      maxDrawdown: 0,  // Initialize to 0
       averageProfit: 0,
       averageLoss: 0,
       sharpeRatio: 0,
@@ -168,102 +247,153 @@ router.post('/', authenticateJWT, async (req, res) => {
     // Process each instrument
     console.log(`[Backtest ${requestId}] Starting instrument processing. Total instruments:`, selectedInstruments.length);
     
+    let globalMaxDrawdown = 0;  // Track max drawdown across all instruments
+    
     for (const instrumentToken of selectedInstruments) {
       console.log(`[Backtest ${requestId}] Processing instrument:`, instrumentToken);
       
       try {
+        // Step 1: Fetch historical data
         console.log(`[Backtest ${requestId}] Fetching historical data for instrument:`, instrumentToken);
-        // Fetch historical data from Kite
-        const historicalData = await kite.getHistoricalData(
-          instrumentToken,
-          fromStr,
-          toStr,
-          interval
-        );
         
-        console.log(`[Backtest ${requestId}] Fetched ${historicalData.length} candles for instrument ${instrumentToken}`);
-        console.log(`[Backtest ${requestId}] First candle:`, historicalData[0]);
-        console.log(`[Backtest ${requestId}] Last candle:`, historicalData[historicalData.length - 1]);
+        // Get instrument details to check if it's a futures contract
+        const instruments = await kite.getInstruments(['NFO']);
+        const instrument = instruments.find(i => i.instrument_token === parseInt(instrumentToken));
+        const isFutures = instrument?.segment === 'NFO-FUT';
+        
+        try {
+          // Prepare request parameters exactly as per Kite API docs
+          const params = {
+            instrument_token: instrumentToken,
+            interval: interval,
+            from: fromStr,          // yyyy-mm-dd hh:mm:ss
+            to: toStr,             // yyyy-mm-dd hh:mm:ss
+            continuous: isFutures ? 1 : 0,  // Pass 1 for futures to get continuous data
+            oi: 0                  // We don't need Open Interest data for now
+          };
+          
+          console.log(`[Backtest ${requestId}] Historical data request params:`, params);
+          
+          // Make a direct API call to match Kite's format
+          const url = `https://api.kite.trade/instruments/historical/${instrumentToken}/${interval}`;
+          const queryParams = new URLSearchParams({
+            from: fromStr,
+            to: toStr,
+            continuous: params.continuous,
+            oi: params.oi
+          });
 
-        if (historicalData.length === 0) {
-          console.log(`[Backtest ${requestId}] Warning: No historical data available for instrument:`, instrumentToken);
+          const response = await fetch(`${url}?${queryParams}`, {
+            headers: {
+              'X-Kite-Version': '3',
+              'Authorization': `token ${process.env.KITE_API_KEY}:${req.user.kiteAccessToken}`
+            }
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP error! status: ${response.status}, body: ${errorText}`);
+          }
+
+          const data = await response.json();
+          console.log(`[Backtest ${requestId}] Raw API response:`, JSON.stringify(data, null, 2));
+
+          if (!data || !data.data || !data.data.candles || data.data.candles.length === 0) {
+            console.log(`[Backtest ${requestId}] Warning: No historical data available for instrument:`, instrumentToken);
+            continue;
+          }
+
+          const historicalData = data.data.candles.map(candle => ({
+            timestamp: candle[0],
+            open: candle[1],
+            high: candle[2],
+            low: candle[3],
+            close: candle[4],
+            volume: candle[5],
+            oi: candle[6]
+          }));
+
+          console.log(`[Backtest ${requestId}] Fetched ${historicalData.length} candles`);
+          console.log(`[Backtest ${requestId}] First candle:`, historicalData[0]);
+          console.log(`[Backtest ${requestId}] Last candle:`, historicalData[historicalData.length - 1]);
+
+          // Step 2: Process candles and apply strategy
+          let position = null;
+          let trades = [];
+          let runningPnL = 0;
+          let peak = 0;
+          let maxDrawdown = 0;
+
+          for (let i = 50; i < historicalData.length; i++) {
+            const candle = historicalData[i];
+            const prevCandles = historicalData.slice(i - 50, i);
+            
+            // Calculate strategy signals
+            const signals = calculateSignals(strategy, candle, prevCandles);
+            
+            // Handle entry
+            if (!position && signals.buy) {
+              position = {
+                type: 'BUY',
+                entryPrice: candle.close,
+                entryTime: candle.timestamp,
+                quantity: Math.floor(investment / candle.close)
+              };
+              console.log(`[Backtest ${requestId}] BUY Signal:`, {
+                time: candle.timestamp,
+                price: candle.close,
+                quantity: position.quantity
+              });
+            }
+            
+            // Handle exit based on profit target or stop loss
+            if (position) {
+              const pnlPercent = ((candle.close - position.entryPrice) / position.entryPrice) * 100;
+              
+              if (pnlPercent >= profitTarget || pnlPercent <= -stopLoss || signals.sell) {
+                const pnl = (candle.close - position.entryPrice) * position.quantity;
+                runningPnL += pnl;
+                
+                // Update peak and drawdown
+                if (runningPnL > peak) {
+                  peak = runningPnL;
+                }
+                const drawdown = peak - runningPnL;
+                if (drawdown > maxDrawdown) {
+                  maxDrawdown = drawdown;
+                  if (maxDrawdown > globalMaxDrawdown) {
+                    globalMaxDrawdown = maxDrawdown;
+                  }
+                }
+
+                trades.push({
+                  entryTime: position.entryTime,
+                  exitTime: candle.timestamp,
+                  entryPrice: position.entryPrice,
+                  exitPrice: candle.close,
+                  quantity: position.quantity,
+                  pnl,
+                  pnlPercent,
+                  exitReason: pnlPercent >= profitTarget ? 'TARGET' : 
+                             pnlPercent <= -stopLoss ? 'STOPLOSS' : 
+                             'SIGNAL'
+                });
+
+                position = null;
+              }
+            }
+          }
+
+          // Add trades to result
+          result.trades.push(...trades);
+          
+        } catch (error) {
+          console.error(`[Backtest ${requestId}] Error fetching historical data:`, error);
+          if (error.response) {
+            console.error(`[Backtest ${requestId}] API Response:`, error.response.data);
+          }
           continue;
         }
-
-        // Apply strategy to historical data
-        console.log(`[Backtest ${requestId}] Applying ${strategy} strategy to historical data`);
-        let position = null;
-        let trades = [];
-        let signalsGenerated = 0;
-        let buySignals = 0;
-        let sellSignals = 0;
-
-        for (let i = 50; i < historicalData.length; i++) {
-          const candle = historicalData[i];
-          const prevCandles = historicalData.slice(i - 50, i);
-          
-          // Calculate indicators based on strategy
-          const signals = calculateSignals(strategy, candle, prevCandles);
-          signalsGenerated++;
-          
-          if (signals.buy) buySignals++;
-          if (signals.sell) sellSignals++;
-          
-          if (!position && signals.buy) {
-            console.log(`[Backtest ${requestId}] BUY Signal at ${candle.date}, Price: ${candle.close}`);
-            position = {
-              type: 'BUY',
-              entryPrice: candle.close,
-              entryDate: new Date(candle.date),
-              quantity: Math.floor(investment / candle.close)
-            };
-          } else if (position && (
-            (position.type === 'BUY' && (
-              signals.sell || 
-              (candle.close >= position.entryPrice * (1 + profitTarget/100)) ||
-              (candle.close <= position.entryPrice * (1 - stopLoss/100))
-            ))
-          )) {
-            // Close position
-            const pnl = position.type === 'BUY' 
-              ? (candle.close - position.entryPrice) * position.quantity
-              : (position.entryPrice - candle.close) * position.quantity;
-            
-            const pnlPercentage = (pnl / (position.entryPrice * position.quantity)) * 100;
-            
-            console.log(`[Backtest ${requestId}] Position closed:`, {
-              entryDate: position.entryDate,
-              exitDate: candle.date,
-              entryPrice: position.entryPrice,
-              exitPrice: candle.close,
-              pnl,
-              pnlPercentage
-            });
-            
-            trades.push({
-              entry_date: position.entryDate.toISOString(),
-              exit_date: new Date(candle.date).toISOString(),
-              type: position.type,
-              quantity: position.quantity,
-              entry_price: position.entryPrice,
-              exit_price: candle.close,
-              pnl: pnl,
-              pnl_percentage: pnlPercentage
-            });
-            
-            position = null;
-          }
-        }
-
-        console.log(`[Backtest ${requestId}] Strategy statistics:`, {
-          signalsGenerated,
-          buySignals,
-          sellSignals,
-          tradesExecuted: trades.length
-        });
-
-        // Add trades to result
-        result.trades.push(...trades);
         
       } catch (error) {
         console.error(`[Backtest ${requestId}] Error processing instrument:`, instrumentToken, error);
@@ -271,50 +401,19 @@ router.post('/', authenticateJWT, async (req, res) => {
       }
     }
 
-    // Calculate summary statistics
+    // Calculate final statistics
     console.log(`[Backtest ${requestId}] Calculating final statistics`);
     result.totalTrades = result.trades.length;
     const profitableTrades = result.trades.filter(t => t.pnl > 0);
-    result.winRate = (profitableTrades.length / result.totalTrades) * 100;
+    result.winRate = result.totalTrades > 0 ? (profitableTrades.length / result.totalTrades) * 100 : 0;
     result.totalPnL = result.trades.reduce((sum, t) => sum + t.pnl, 0);
-    
+    result.maxDrawdown = globalMaxDrawdown;  // Use the tracked global max drawdown
+
     const profits = result.trades.filter(t => t.pnl > 0).map(t => t.pnl);
     const losses = result.trades.filter(t => t.pnl < 0).map(t => t.pnl);
     
     result.averageProfit = profits.length > 0 ? profits.reduce((a, b) => a + b, 0) / profits.length : 0;
     result.averageLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
-    
-    console.log(`[Backtest ${requestId}] Performance metrics:`, {
-      totalTrades: result.totalTrades,
-      profitableTrades: profitableTrades.length,
-      winRate: result.winRate,
-      totalPnL: result.totalPnL,
-      averageProfit: result.averageProfit,
-      averageLoss: result.averageLoss
-    });
-
-    // Calculate max drawdown
-    let maxDrawdown = 0;
-    let peak = 0;
-    let runningPnL = 0;
-    
-    result.trades.forEach(trade => {
-      runningPnL += trade.pnl;
-      if (runningPnL > peak) {
-        peak = runningPnL;
-      }
-      const drawdown = peak - runningPnL;
-      if (drawdown > maxDrawdown) {
-        maxDrawdown = drawdown;
-      }
-    });
-    
-    result.maxDrawdown = -maxDrawdown;
-    console.log(`[Backtest ${requestId}] Max drawdown:`, maxDrawdown);
-    
-    // Sort trades by date and only keep the last 5 for display
-    result.trades.sort((a, b) => new Date(b.entry_date).getTime() - new Date(a.entry_date).getTime());
-    result.trades = result.trades.slice(0, 5);
 
     console.log(`[Backtest ${requestId}] Backtest completed successfully`);
     console.log(`[Backtest ${requestId}] Final result:`, JSON.stringify(result, null, 2));
@@ -327,91 +426,112 @@ router.post('/', authenticateJWT, async (req, res) => {
 });
 
 // Helper function to calculate strategy signals
-function calculateSignals(strategy, currentCandle, prevCandles) {
+function calculateSignals(strategy, candle, prevCandles) {
+  const ltp = candle.close; // Use close price as LTP for historical data
+  
   switch (strategy) {
-    case 'MOVING_AVERAGE':
-      return calculateMovingAverageSignals(currentCandle, prevCandles);
+    case 'MovingAverage':
+      return calculateMovingAverageSignals(ltp, prevCandles);
     case 'RSI':
-      return calculateRSISignals(currentCandle, prevCandles);
+      return calculateRSISignals(ltp, prevCandles);
     case 'MACD':
-      return calculateMACDSignals(currentCandle, prevCandles);
+      return calculateMACDSignals(ltp, prevCandles);
     default:
       return { buy: false, sell: false };
   }
 }
 
-function calculateMovingAverageSignals(currentCandle, prevCandles) {
-  // Calculate 20-period and 50-period moving averages
-  const ma20 = calculateMA(prevCandles.slice(-20));
-  const ma50 = calculateMA(prevCandles.slice(-50));
-  const prevMa20 = calculateMA(prevCandles.slice(-21, -1));
-  const prevMa50 = calculateMA(prevCandles.slice(-51, -1));
-
-  return {
-    buy: prevMa20 <= prevMa50 && ma20 > ma50,
-    sell: prevMa20 >= prevMa50 && ma20 < ma50
-  };
+function calculateMovingAverageSignals(ltp, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const sma20 = calculateSMA(prices, 20);
+  const sma50 = calculateSMA(prices, 50);
+  
+  // Generate buy signal when shorter MA crosses above longer MA
+  const buy = sma20 > sma50 && 
+    calculateSMA(prices.slice(0, -1), 20) <= calculateSMA(prices.slice(0, -1), 50);
+  
+  // Generate sell signal when shorter MA crosses below longer MA
+  const sell = sma20 < sma50 && 
+    calculateSMA(prices.slice(0, -1), 20) >= calculateSMA(prices.slice(0, -1), 50);
+  
+  return { buy, sell };
 }
 
-function calculateRSISignals(currentCandle, prevCandles) {
-  const rsi = calculateRSI(prevCandles);
-  return {
-    buy: rsi < 30,
-    sell: rsi > 70
-  };
+function calculateRSISignals(ltp, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const rsi = calculateRSI(prices, 14);
+  
+  // Buy when RSI crosses above oversold level (30)
+  const buy = rsi > 30 && calculateRSI(prices.slice(0, -1), 14) <= 30;
+  
+  // Sell when RSI crosses below overbought level (70)
+  const sell = rsi < 70 && calculateRSI(prices.slice(0, -1), 14) >= 70;
+  
+  return { buy, sell };
 }
 
-function calculateMACDSignals(currentCandle, prevCandles) {
-  const { macd, signal } = calculateMACD(prevCandles);
-  const prevMacd = macd[macd.length - 2];
-  const prevSignal = signal[signal.length - 2];
-  const currentMacd = macd[macd.length - 1];
-  const currentSignal = signal[signal.length - 1];
-
-  return {
-    buy: prevMacd <= prevSignal && currentMacd > currentSignal,
-    sell: prevMacd >= prevSignal && currentMacd < currentSignal
-  };
+function calculateMACDSignals(ltp, prevCandles) {
+  const prices = [...prevCandles.map(c => c.close), ltp];
+  const { macd, signal } = calculateMACD(prices);
+  
+  // Buy when MACD crosses above signal line
+  const buy = macd > signal && 
+    calculateMACD(prices.slice(0, -1)).macd <= calculateMACD(prices.slice(0, -1)).signal;
+  
+  // Sell when MACD crosses below signal line
+  const sell = macd < signal && 
+    calculateMACD(prices.slice(0, -1)).macd >= calculateMACD(prices.slice(0, -1)).signal;
+  
+  return { buy, sell };
 }
 
-function calculateMA(candles) {
-  const sum = candles.reduce((acc, candle) => acc + candle.close, 0);
-  return sum / candles.length;
+// Helper functions for technical indicators
+function calculateSMA(prices, period) {
+  if (prices.length < period) return null;
+  return prices.slice(-period).reduce((sum, price) => sum + price, 0) / period;
 }
 
-function calculateRSI(candles, period = 14) {
+function calculateRSI(prices, period) {
+  if (prices.length < period + 1) return null;
+  
   let gains = 0;
   let losses = 0;
-
-  for (let i = 1; i < period + 1; i++) {
-    const change = candles[candles.length - i].close - candles[candles.length - i - 1].close;
-    if (change >= 0) {
-      gains += change;
+  
+  for (let i = 1; i <= period; i++) {
+    const difference = prices[prices.length - i] - prices[prices.length - i - 1];
+    if (difference >= 0) {
+      gains += difference;
     } else {
-      losses -= change;
+      losses -= difference;
     }
   }
-
+  
   const avgGain = gains / period;
   const avgLoss = losses / period;
+  
+  if (avgLoss === 0) return 100;
+  
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
 
-function calculateMACD(candles) {
-  const ema12 = calculateEMA(candles.map(c => c.close), 12);
-  const ema26 = calculateEMA(candles.map(c => c.close), 26);
-  const macd = ema12.map((v, i) => v - ema26[i]);
-  const signal = calculateEMA(macd, 9);
+function calculateMACD(prices) {
+  const ema12 = calculateEMA(prices, 12);
+  const ema26 = calculateEMA(prices, 26);
+  const macd = ema12 - ema26;
+  const signal = calculateEMA([...Array(prices.length - 26).fill(0), macd], 9);
+  
   return { macd, signal };
 }
 
-function calculateEMA(values, period) {
-  const k = 2 / (period + 1);
-  let ema = [values[0]];
+function calculateEMA(prices, period) {
+  if (prices.length < period) return null;
   
-  for (let i = 1; i < values.length; i++) {
-    ema.push(values[i] * k + ema[i - 1] * (1 - k));
+  const multiplier = 2 / (period + 1);
+  let ema = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
+  
+  for (let i = period; i < prices.length; i++) {
+    ema = (prices[i] - ema) * multiplier + ema;
   }
   
   return ema;

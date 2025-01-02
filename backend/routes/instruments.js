@@ -342,4 +342,145 @@ router.get('/status', authenticateJWT, async (req, res) => {
   }
 });
 
+// Validate instrument endpoint
+router.get('/validate/:instrumentToken', authenticateJWT, async (req, res) => {
+  try {
+    const { instrumentToken } = req.params;
+    const kite = new KiteConnect({
+      api_key: process.env.KITE_API_KEY
+    });
+    
+    // Set the access token
+    const kiteToken = req.headers['x-kite-access-token'];
+    kite.setAccessToken(kiteToken);
+
+    // Calculate dates for the last week of available data
+    const now = new Date();
+    
+    // Force the year to be current year to avoid future dates
+    const currentYear = 2024; // Hardcode current year since server time is in 2025
+    
+    // Set end date to the last completed trading day
+    const endDate = new Date(now);
+    endDate.setFullYear(currentYear);
+    endDate.setHours(15, 30, 0, 0);
+    
+    // If current time is before market close or it's the same day, use previous day
+    if (now < endDate || now.toDateString() === endDate.toDateString()) {
+      endDate.setDate(endDate.getDate() - 1);
+    }
+    
+    // Skip weekends for end date
+    while (endDate.getDay() === 0 || endDate.getDay() === 6) {
+      endDate.setDate(endDate.getDate() - 1);
+    }
+    
+    // Set start date to 7 trading days before end date
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - 7);
+    startDate.setHours(9, 15, 0, 0);
+    
+    // Skip weekends for start date
+    while (startDate.getDay() === 0 || startDate.getDay() === 6) {
+      startDate.setDate(startDate.getDate() + 1);
+    }
+
+    // Format dates according to Kite's requirements (YYYY-MM-DD HH:mm:ss)
+    const fromDate = startDate.toISOString().slice(0, 10) + ' 09:15:00';
+    const toDate = endDate.toISOString().slice(0, 10) + ' 15:30:00';
+
+    console.log('Validating instrument:', {
+      instrumentToken,
+      fromDate,
+      toDate,
+      interval: 'minute',
+      currentTime: now.toISOString(),
+      startDateDay: startDate.getDay(),
+      endDateDay: endDate.getDay()
+    });
+
+    try {
+      // Make a direct API call to match Kite's format
+      const url = `https://api.kite.trade/instruments/historical/${instrumentToken}/minute`;
+      const params = new URLSearchParams({
+        from: fromDate,
+        to: toDate
+      });
+
+      const response = await fetch(`${url}?${params}`, {
+        headers: {
+          'X-Kite-Version': '3',
+          'Authorization': `token ${process.env.KITE_API_KEY}:${kiteToken}`
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP error! status: ${response.status}, body: ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log('Raw API response:', JSON.stringify(data, null, 2));  // Pretty print the response
+      
+      // Extract candles from the response
+      const candles = data.data?.candles || [];
+
+      // Log the response for debugging
+      console.log('Historical data response:', {
+        dataPoints: candles.length,
+        firstPoint: candles[0],
+        lastPoint: candles[candles.length - 1],
+        fromDate,
+        toDate
+      });
+
+      // If we get data back and it contains valid candles, the instrument is valid
+      const isValid = Array.isArray(candles) && candles.length > 0 && 
+                     candles[0].length >= 5; // Each candle should have at least OHLCV data
+      
+      res.json({
+        isValid,
+        message: isValid ? 'Instrument supports historical data' : 'No historical data available for this instrument',
+        details: isValid ? {
+          dataPoints: candles.length,
+          fromDate,
+          toDate,
+          firstCandle: candles[0],
+          lastCandle: candles[candles.length - 1],
+          sampleData: {
+            timestamp: candles[0][0],
+            open: candles[0][1],
+            high: candles[0][2],
+            low: candles[0][3],
+            close: candles[0][4],
+            volume: candles[0][5]
+          }
+        } : null
+      });
+    } catch (error) {
+      console.error('Error fetching historical data:', error);
+      res.json({
+        isValid: false,
+        message: `Error fetching historical data: ${error.message}`,
+        error: {
+          type: error.name,
+          message: error.message,
+          fromDate,
+          toDate
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error validating instrument:', error);
+    res.status(500).json({
+      isValid: false,
+      message: 'Failed to validate instrument',
+      error: {
+        type: error.name,
+        message: error.message
+      }
+    });
+  }
+});
+
 module.exports = router; 

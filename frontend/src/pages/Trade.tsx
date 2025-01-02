@@ -22,10 +22,19 @@ import {
   FormControlLabel,
   Switch,
   LinearProgress,
-  InputAdornment
+  InputAdornment,
+  Tabs,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow
 } from '@mui/material';
-import RefreshIcon from '@mui/icons-material/Refresh';
 import InstrumentSearchWrapper from '../components/InstrumentSearchWrapper';
+import { DatePicker } from '@mui/x-date-pickers/DatePicker';
+import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
+import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 
 interface Trade {
   instrument_token: number;
@@ -80,6 +89,50 @@ interface TradeSummary {
   total_pnl_percentage: number;
 }
 
+interface TabPanelProps {
+  children?: React.ReactNode;
+  index: number;
+  value: number;
+}
+
+interface BacktestTrade {
+  entryTime: string;
+  exitTime: string;
+  entryPrice: number;
+  exitPrice: number;
+  quantity: number;
+  pnl: number;
+  pnlPercent: number;
+  exitReason: 'TARGET' | 'STOPLOSS' | 'SIGNAL';
+}
+
+interface BacktestResult {
+  trades: BacktestTrade[];
+  totalTrades: number;
+  totalPnL: number;
+  winRate: number;
+}
+
+function CustomTabPanel(props: TabPanelProps) {
+  const { children, value, index, ...other } = props;
+
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`trade-tabpanel-${index}`}
+      aria-labelledby={`trade-tab-${index}`}
+      {...other}
+    >
+      {value === index && (
+        <Box sx={{ p: 3 }}>
+          {children}
+        </Box>
+      )}
+    </div>
+  );
+}
+
 const Trade: React.FC = () => {
   const navigate = useNavigate();
   const { isAuthenticated, loading: authLoading } = useSelector((state: RootState) => state.auth);
@@ -123,8 +176,34 @@ const Trade: React.FC = () => {
   const [selectedInstrument, setSelectedInstrument] = useState<Instrument | null>(null);
   const [strategy, setStrategy] = useState('');
   const [timeframe, setTimeframe] = useState('5minute');
-  const [backtestStartDate, setBacktestStartDate] = useState('');
-  const [backtestEndDate, setBacktestEndDate] = useState('');
+  
+  // Calculate default dates
+  const now = new Date();
+  // If current time is before market close (15:30), use previous day
+  if (now.getHours() < 15 || (now.getHours() === 15 && now.getMinutes() < 30)) {
+    now.setDate(now.getDate() - 1);
+  }
+  // Set to market closing time
+  const defaultEndDate = new Date(now);
+  defaultEndDate.setHours(15, 30, 0, 0);
+  
+  // Skip weekends for end date
+  while (defaultEndDate.getDay() === 0 || defaultEndDate.getDay() === 6) {
+    defaultEndDate.setDate(defaultEndDate.getDate() - 1);
+  }
+  
+  // Calculate start date (7 days before end date)
+  const defaultStartDate = new Date(defaultEndDate);
+  defaultStartDate.setDate(defaultStartDate.getDate() - 7);
+  defaultStartDate.setHours(9, 15, 0, 0);
+  
+  // Skip weekends for start date
+  while (defaultStartDate.getDay() === 0 || defaultStartDate.getDay() === 6) {
+    defaultStartDate.setDate(defaultStartDate.getDate() + 1);
+  }
+
+  const [backtestStartDate, setBacktestStartDate] = useState<Date | null>(defaultStartDate);
+  const [backtestEndDate, setBacktestEndDate] = useState<Date | null>(defaultEndDate);
   const [investment, setInvestment] = useState(0);
   const [profitTarget, setProfitTarget] = useState(0);
   const [stopLoss, setStopLoss] = useState(0);
@@ -132,6 +211,193 @@ const Trade: React.FC = () => {
   const [runningBacktest, setRunningBacktest] = useState(false);
   const [initializingLiveTrading, setInitializingLiveTrading] = useState(false);
   const [availableBalance, setAvailableBalance] = useState(0);
+  const [tabValue, setTabValue] = useState(0);
+  const [simulatedTrades, setSimulatedTrades] = useState<Trade[]>([]);
+  const [simulatedTradeSummary, setSimulatedTradeSummary] = useState<TradeSummary>({
+    total_trades: 0,
+    open_trades: 0,
+    closed_trades: 0,
+    manual_trades: 0,
+    auto_trades: 0,
+    total_pnl: 0,
+    total_pnl_percentage: 0
+  });
+
+  // Add this helper function for date validation
+  const isWeekend = (date: Date): boolean => {
+    const day = date.getDay();
+    return day === 0 || day === 6;
+  };
+
+  const isValidDate = (date: Date): boolean => {
+    const now = new Date();
+    const sixtyDaysAgo = new Date(now.getTime() - (60 * 24 * 60 * 60 * 1000));
+    return date >= sixtyDaysAgo && date <= now && !isWeekend(date);
+  };
+
+  // Update the validateDates function
+  const validateDates = useCallback(() => {
+    if (!backtestStartDate || !backtestEndDate) {
+      setError('Please select both start and end dates');
+      return false;
+    }
+
+    const now = new Date();
+    if (now.getHours() < 15 || (now.getHours() === 15 && now.getMinutes() < 30)) {
+      now.setDate(now.getDate() - 1);
+    }
+    now.setHours(15, 30, 0, 0);
+
+    // Skip weekends for current date
+    while (now.getDay() === 0 || now.getDay() === 6) {
+      now.setDate(now.getDate() - 1);
+    }
+
+    const sixtyDaysAgo = new Date(now);
+    sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+    sixtyDaysAgo.setHours(9, 15, 0, 0);
+    
+    // Skip weekends for past date
+    while (sixtyDaysAgo.getDay() === 0 || sixtyDaysAgo.getDay() === 6) {
+      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() + 1);
+    }
+    
+    if (backtestStartDate > now || backtestEndDate > now) {
+      setError('Cannot use future dates for backtest');
+      return false;
+    }
+    
+    if (backtestStartDate < sixtyDaysAgo) {
+      setError('Historical data only available for last 60 trading days');
+      return false;
+    }
+    
+    if (backtestEndDate <= backtestStartDate) {
+      setError('End date must be after start date');
+      return false;
+    }
+
+    // Ensure selected dates are not weekends
+    if (backtestStartDate.getDay() === 0 || backtestStartDate.getDay() === 6) {
+      setError('Start date cannot be a weekend');
+      return false;
+    }
+
+    if (backtestEndDate.getDay() === 0 || backtestEndDate.getDay() === 6) {
+      setError('End date cannot be a weekend');
+      return false;
+    }
+    
+    return true;
+  }, [backtestStartDate, backtestEndDate]);
+
+  // Add this new function before handleBacktest
+  const validateInstrument = async (instrumentToken: number): Promise<boolean> => {
+    try {
+      // Check if the instrument is valid and supports historical data
+      const response = await api.get(`/instruments/validate/${instrumentToken}`);
+      return response.data.isValid;
+    } catch (error) {
+      console.error('Error validating instrument:', error);
+      if (error instanceof AxiosError && error.response?.data?.message) {
+        setError(error.response.data.message);
+      } else {
+        setError('Failed to validate instrument');
+      }
+      return false;
+    }
+  };
+
+  // Update handleBacktest to store simulated trades
+  const handleBacktest = async () => {
+    if (!selectedInstrument || !isValidForBacktest) {
+      setError('Please fill all required fields');
+      return;
+    }
+
+    if (!validateDates()) {
+      return;
+    }
+
+    setRunningBacktest(true);
+    setError(null);
+
+    try {
+      // First validate the instrument
+      const isValid = await validateInstrument(selectedInstrument.instrument_token);
+      if (!isValid) {
+        setError('Selected instrument does not support historical data');
+        return;
+      }
+
+      // Format dates according to Kite's requirements (YYYY-MM-DD HH:mm:ss)
+      const startDate = backtestStartDate?.toLocaleDateString('en-CA') + ' 09:15:00';
+      const endDate = backtestEndDate?.toLocaleDateString('en-CA') + ' 15:30:00';
+
+      const config: BacktestConfig = {
+        mode: tradingMode,
+        strategy,
+        timeframe,
+        startDate,
+        endDate,
+        investment,
+        profitTarget,
+        stopLoss,
+        simulationAmount: investment,
+        selectedInstruments: [selectedInstrument.instrument_token]
+      };
+
+      console.log('Sending backtest config:', config);
+      const results = await api.post<BacktestResult>('/backtest', config);
+      console.log('Backtest results:', results.data);
+      
+      // Transform backtest results into Trade format
+      const simulatedTradesList = results.data.trades.map((trade: BacktestTrade) => ({
+        instrument_token: selectedInstrument?.instrument_token || 0,
+        order_id: `SIM_${Math.random().toString(36).substring(7)}`,
+        tradingsymbol: selectedInstrument?.tradingsymbol || '',
+        exchange: selectedInstrument?.exchange || '',
+        transaction_type: 'BUY' as const,
+        quantity: trade.quantity,
+        average_price: trade.entryPrice,
+        product: 'SIM',
+        status: 'COMPLETE',
+        order_timestamp: trade.entryTime,
+        ltp: trade.exitPrice,
+        pnl: trade.pnl,
+        pnl_percentage: trade.pnlPercent,
+        trade_type: 'AUTO' as const,
+        is_open: false
+      }));
+
+      setSimulatedTrades(simulatedTradesList);
+      
+      // Calculate simulated trade summary
+      const simSummary = {
+        total_trades: results.data.totalTrades,
+        open_trades: 0,
+        closed_trades: results.data.totalTrades,
+        manual_trades: 0,
+        auto_trades: results.data.totalTrades,
+        total_pnl: results.data.totalPnL,
+        total_pnl_percentage: results.data.winRate
+      };
+      setSimulatedTradeSummary(simSummary);
+      
+      // Switch to simulated trades tab
+      setTabValue(1);
+      setError('Backtest completed successfully');
+    } catch (error) {
+      console.error('Backtest error:', error);
+      if (error instanceof AxiosError && error.response?.data?.message) {
+        setError(error.response.data.message);
+      } else {
+        setError('Failed to run backtest. Please check the parameters.');
+      }
+    } finally {
+      setRunningBacktest(false);
+    }
+  };
 
   // Keep the instruments state for backward compatibility
   const [instruments] = useState<Instrument[]>([]);
@@ -279,56 +545,11 @@ const Trade: React.FC = () => {
     }
   }, []);
 
-  // Handle backtest
-  const handleBacktest = async () => {
-    if (!selectedInstrument || !isValidForBacktest) {
-      setError('Please fill all required fields');
-      return;
-    }
-
-    setRunningBacktest(true);
-    setError(null);
-
-    try {
-      // Log the config for debugging
-      const config: BacktestConfig = {
-        instrument: selectedInstrument,
-        startDate: backtestStartDate,
-        endDate: backtestEndDate,
-        capital: investment,
-        strategy: strategy,
-        params: {
-          profitTarget,
-          stopLoss,
-          timeframe
-        }
-      };
-
-      console.log('Sending backtest config:', config);
-
-      const results = await api.post('/backtest', config);
-      console.log('Backtest results:', results.data);
-
-      // TODO: Show backtest results in UI
-      // For now, just show a success message
-      setError('Backtest completed successfully');
-    } catch (error) {
-      console.error('Backtest error:', error);
-      if (error instanceof AxiosError && error.response?.data?.message) {
-        setError(error.response.data.message);
-      } else {
-        setError('Failed to run backtest. Please check the parameters.');
-      }
-    } finally {
-      setRunningBacktest(false);
-    }
-  };
-
   // Handle start live trading
   const handleStartLiveTrading = async () => {
     if (!isValidForLiveTrading || !selectedInstrument) {
-      return;
-    }
+        return;
+      }
 
     try {
       setInitializingLiveTrading(true);
@@ -346,7 +567,7 @@ const Trade: React.FC = () => {
   const updateTrades = useCallback((ticks: WebSocketTick[]) => {
     if (!Array.isArray(ticks) || ticks.length === 0) {
       console.warn('Invalid or empty ticks data received:', ticks);
-      return;
+        return;
     }
 
     setActiveTrades((prevTrades: Trade[]) => {
@@ -610,7 +831,7 @@ const Trade: React.FC = () => {
     };
 
     connect();
-
+    
     return () => {
       mounted = false;
       if (connectTimeoutId) {
@@ -650,18 +871,12 @@ const Trade: React.FC = () => {
     }
   }, [isAuthenticated, loadActiveTrades]);
 
-  // Render loading state
-  if (loading || authLoading) {
-    return (
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
-          <CircularProgress />
-        </Box>
-      </Container>
-    );
-  }
+  // Add this function to handle tab changes
+  const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
+    setTabValue(newValue);
+  };
 
-  // Render main content
+  // Modify the return statement to include tabs
   return (
     <Container maxWidth="lg">
       {(error || wsError) && (
@@ -935,34 +1150,57 @@ const Trade: React.FC = () => {
               {/* Date Range Selection for Backtest */}
               {tradingMode === 'simulation' && (
                 <>
-                  <Grid item xs={12} sm={6}>
-                    <TextField
-                      fullWidth
-                      label="Start Date"
-                      type="date"
-                      value={backtestStartDate}
-                      onChange={(e) => setBacktestStartDate(e.target.value)}
-                      InputLabelProps={{ shrink: true }}
-                      required
-                      inputProps={{
-                        max: new Date().toISOString().split('T')[0]
-                      }}
-                    />
+                  <Grid item xs={12}>
+                    <Box sx={{ mt: 3, mb: 2 }}>
+                      <Typography variant="subtitle1" gutterBottom>
+                        Backtest Date Range
+                      </Typography>
+                      <LocalizationProvider dateAdapter={AdapterDateFns}>
+                        <Grid container spacing={3}>
+                          <Grid item xs={12} md={6}>
+                            <DatePicker
+                              label="Start Date"
+                              value={backtestStartDate}
+                              onChange={(newValue: Date | null) => setBacktestStartDate(newValue)}
+                              disabled={runningBacktest}
+                              shouldDisableDate={(date: Date) => !isValidDate(date)}
+                              minDate={new Date(new Date().getTime() - (60 * 24 * 60 * 60 * 1000))}
+                              maxDate={new Date()}
+                              slotProps={{
+                                textField: {
+                                  fullWidth: true,
+                                  error: !!error && error.includes('start date'),
+                                  helperText: error && error.includes('start date') ? error : '',
+                                  sx: { mb: 2 }
+                                },
+                              }}
+                            />
+                          </Grid>
+                          <Grid item xs={12} md={6}>
+                            <DatePicker
+                              label="End Date"
+                              value={backtestEndDate}
+                              onChange={(newValue: Date | null) => setBacktestEndDate(newValue)}
+                              disabled={runningBacktest || !backtestStartDate}
+                              shouldDisableDate={(date: Date) => !isValidDate(date) || (backtestStartDate ? date <= backtestStartDate : false)}
+                              minDate={backtestStartDate || undefined}
+                              maxDate={new Date()}
+                              slotProps={{
+                                textField: {
+                                  fullWidth: true,
+                                  error: !!error && error.includes('end date'),
+                                  helperText: error && error.includes('end date') ? error : '',
+                                  sx: { mb: 2 }
+                                },
+                              }}
+                            />
+                          </Grid>
+                        </Grid>
+                      </LocalizationProvider>
+                    </Box>
                   </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <TextField
-                      fullWidth
-                      label="End Date"
-                      type="date"
-                      value={backtestEndDate}
-                      onChange={(e) => setBacktestEndDate(e.target.value)}
-                      InputLabelProps={{ shrink: true }}
-                      required
-                      inputProps={{
-                        max: new Date().toISOString().split('T')[0]
-                      }}
-                    />
-                  </Grid>
+
+                  {/* Investment and Target Fields */}
                   <Grid item xs={12}>
                     <TextField
                       fullWidth
@@ -974,6 +1212,7 @@ const Trade: React.FC = () => {
                       InputProps={{
                         inputProps: { min: 0 }
                       }}
+                      sx={{ mb: 2 }}
                     />
                   </Grid>
                   <Grid item xs={12} sm={6}>
@@ -988,6 +1227,7 @@ const Trade: React.FC = () => {
                         endAdornment: <InputAdornment position="end">%</InputAdornment>,
                         inputProps: { min: 0 }
                       }}
+                      sx={{ mb: 2 }}
                     />
                   </Grid>
                   <Grid item xs={12} sm={6}>
@@ -1002,6 +1242,7 @@ const Trade: React.FC = () => {
                         endAdornment: <InputAdornment position="end">%</InputAdornment>,
                         inputProps: { min: 0 }
                       }}
+                      sx={{ mb: 2 }}
                     />
                   </Grid>
                 </>
@@ -1112,186 +1353,223 @@ const Trade: React.FC = () => {
           </Paper>
         </Grid>
 
-        {/* Trade Summary and Active Trades Section */}
+        {/* Trades Display Section */}
         <Grid item xs={12}>
-          {/* Trade Summary Section */}
-          <Paper sx={{ p: 2, mb: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Trade Summary
-            </Typography>
-            <Grid container spacing={2}>
-              <Grid item xs={12} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Total Trades
-                  </Typography>
-                  <Typography variant="h6">
-                    {tradeSummary.total_trades}
-                  </Typography>
-                </Box>
-              </Grid>
-              <Grid item xs={6} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Open Trades
-                  </Typography>
-                  <Typography variant="h6" color="primary">
-                    {tradeSummary.open_trades}
-                  </Typography>
-                </Box>
-              </Grid>
-              <Grid item xs={6} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Closed Trades
-                  </Typography>
-                  <Typography variant="h6">
-                    {tradeSummary.closed_trades}
-                  </Typography>
-                </Box>
-              </Grid>
-              <Grid item xs={6} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Manual Trades
-                  </Typography>
-                  <Typography variant="h6">
-                    {tradeSummary.manual_trades}
-                  </Typography>
-                </Box>
-              </Grid>
-              <Grid item xs={6} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Auto Trades
-                  </Typography>
-                  <Typography variant="h6">
-                    {tradeSummary.auto_trades}
-                  </Typography>
-                </Box>
-              </Grid>
-              <Grid item xs={12} md={4}>
-                <Box>
-                  <Typography variant="subtitle2" color="text.secondary">
-                    Total P&L
-                  </Typography>
-                  <Typography 
-                    variant="h6" 
-                    color={tradeSummary.total_pnl >= 0 ? 'success.main' : 'error.main'}
-                  >
-                    ₹{tradeSummary.total_pnl.toFixed(2)} ({tradeSummary.total_pnl_percentage.toFixed(2)}%)
-                  </Typography>
-                </Box>
-              </Grid>
-            </Grid>
-          </Paper>
-
-          {/* Active Trades Table */}
           <Paper sx={{ p: 2 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-              <Typography variant="h6">
-                Active Trades
-              </Typography>
-              <Button
-                startIcon={<RefreshIcon />}
-                onClick={loadActiveTrades}
-                size="small"
-              >
-                Refresh
-              </Button>
+            <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+              <Tabs value={tabValue} onChange={handleTabChange} aria-label="trade tabs">
+                <Tab label="Active Trades" />
+                <Tab label="Simulated Trades" />
+              </Tabs>
             </Box>
-            <Box sx={{ overflowX: 'auto' }}>
-              <table style={{ 
-                width: '100%', 
-                borderCollapse: 'collapse',
-                backgroundColor: '#fff',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
-              }}>
-                <thead>
-                  <tr style={{
-                    backgroundColor: '#f5f5f5',
-                    borderBottom: '2px solid #e0e0e0'
-                  }}>
-                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Symbol</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Type</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Quantity</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Entry Price</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Current Price</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>P&L</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>P&L%</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Trade Type</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Status</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* Remove duplicates by using tradingsymbol + product as key */}
-                  {Array.from(new Map(activeTrades.map(trade => 
-                    [`${trade.tradingsymbol}-${trade.product}`, trade]
-                  )).values()).map((trade) => (
-                    <tr 
-                      key={`${trade.tradingsymbol}-${trade.product}`}
-                      style={{ borderBottom: '1px solid #e0e0e0' }}
-                    >
-                      <td style={{ padding: '12px 16px' }}>{trade.tradingsymbol}</td>
-                      <td style={{ padding: '12px 16px' }}>{trade.transaction_type}</td>
-                      <td style={{ padding: '12px 16px', textAlign: 'right' }}>{trade.quantity}</td>
-                      <td style={{ padding: '12px 16px', textAlign: 'right' }}>₹{trade.average_price.toFixed(2)}</td>
-                      <td style={{ padding: '12px 16px', textAlign: 'right' }}>₹{trade.ltp.toFixed(2)}</td>
-                      <td style={{ 
-                        padding: '12px 16px', 
-                        textAlign: 'right',
-                        color: trade.pnl >= 0 ? '#4caf50' : '#f44336',
-                        fontWeight: 500
+
+            {/* Active Trades Tab */}
+            <CustomTabPanel value={tabValue} index={0}>
+              <Grid container spacing={2}>
+                {/* Trade Summary */}
+                <Grid item xs={12}>
+                  <Paper sx={{ p: 2, bgcolor: 'background.default' }}>
+                    <Typography variant="h6" gutterBottom>Trade Summary</Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Total Trades</Typography>
+                        <Typography variant="h6">{tradeSummary.total_trades}</Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Open Trades</Typography>
+                        <Typography variant="h6">{tradeSummary.open_trades}</Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Total P&L</Typography>
+                        <Typography variant="h6" color={tradeSummary.total_pnl >= 0 ? 'success.main' : 'error.main'}>
+                          ₹{tradeSummary.total_pnl.toFixed(2)}
+                        </Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">P&L %</Typography>
+                        <Typography variant="h6" color={tradeSummary.total_pnl_percentage >= 0 ? 'success.main' : 'error.main'}>
+                          {tradeSummary.total_pnl_percentage.toFixed(2)}%
+                        </Typography>
+                      </Grid>
+                    </Grid>
+                  </Paper>
+                </Grid>
+
+                {/* Active Trades List */}
+                <Grid item xs={12}>
+                  {loading ? (
+                    <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}>
+                      <CircularProgress />
+                    </Box>
+                  ) : (
+                    <Box sx={{ overflowX: 'auto' }}>
+                      <table style={{ 
+                        width: '100%', 
+                        borderCollapse: 'collapse',
+                        backgroundColor: '#fff',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
                       }}>
-                        ₹{trade.pnl.toFixed(2)}
-                      </td>
-                      <td style={{ 
-                        padding: '12px 16px', 
-                        textAlign: 'right',
-                        color: trade.pnl_percentage >= 0 ? '#4caf50' : '#f44336',
-                        fontWeight: 500
-                      }}>
-                        {trade.pnl_percentage.toFixed(2)}%
-                      </td>
-                      <td style={{ padding: '12px 16px' }}>
-                        <Box
-                          component="span"
-                          sx={{
-                            px: 1,
-                            py: 0.5,
-                            borderRadius: 1,
-                            fontSize: '0.875rem',
-                            bgcolor: trade.trade_type === 'AUTO' ? 'info.light' : 'warning.light',
-                            color: 'white'
-                          }}
-                        >
-                          {trade.trade_type}
-                        </Box>
-                      </td>
-                      <td style={{ padding: '12px 16px' }}>
-                        <Box
-                          component="span"
-                          sx={{
-                            px: 1,
-                            py: 0.5,
-                            borderRadius: 1,
-                            fontSize: '0.875rem',
-                            bgcolor: trade.is_open ? 'success.light' : 'text.disabled',
-                            color: 'white'
-                          }}
-                        >
-                          {trade.is_open ? 'OPEN' : 'CLOSED'}
-                        </Box>
-                      </td>
-                      <td style={{ padding: '12px 16px', color: '#666' }}>
-                        {new Date(trade.order_timestamp).toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Box>
+                        <thead>
+                          <tr style={{
+                            backgroundColor: '#f5f5f5',
+                            borderBottom: '2px solid #e0e0e0'
+                          }}>
+                            <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Symbol</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Type</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Quantity</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Entry Price</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>Current Price</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>P&L</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 600 }}>P&L%</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Trade Type</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Status</th>
+                            <th style={{ padding: '12px 16px', textAlign: 'left', fontWeight: 600 }}>Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {/* Remove duplicates by using tradingsymbol + product as key */}
+                          {Array.from(new Map(activeTrades.map(trade => 
+                            [`${trade.tradingsymbol}-${trade.product}`, trade]
+                          )).values()).map((trade) => (
+                            <tr 
+                              key={`${trade.tradingsymbol}-${trade.product}`}
+                              style={{ borderBottom: '1px solid #e0e0e0' }}
+                            >
+                              <td style={{ padding: '12px 16px' }}>{trade.tradingsymbol}</td>
+                              <td style={{ padding: '12px 16px' }}>{trade.transaction_type}</td>
+                              <td style={{ padding: '12px 16px', textAlign: 'right' }}>{trade.quantity}</td>
+                              <td style={{ padding: '12px 16px', textAlign: 'right' }}>₹{trade.average_price.toFixed(2)}</td>
+                              <td style={{ padding: '12px 16px', textAlign: 'right' }}>₹{trade.ltp.toFixed(2)}</td>
+                              <td style={{ 
+                                padding: '12px 16px', 
+                                textAlign: 'right',
+                                color: trade.pnl >= 0 ? '#4caf50' : '#f44336',
+                                fontWeight: 500
+                              }}>
+                                ₹{trade.pnl.toFixed(2)}
+                              </td>
+                              <td style={{ 
+                                padding: '12px 16px', 
+                                textAlign: 'right',
+                                color: trade.pnl_percentage >= 0 ? '#4caf50' : '#f44336',
+                                fontWeight: 500
+                              }}>
+                                {trade.pnl_percentage.toFixed(2)}%
+                              </td>
+                              <td style={{ padding: '12px 16px' }}>
+                                <Box
+                                  component="span"
+                                  sx={{
+                                    px: 1,
+                                    py: 0.5,
+                                    borderRadius: 1,
+                                    fontSize: '0.875rem',
+                                    bgcolor: trade.trade_type === 'AUTO' ? 'info.light' : 'warning.light',
+                                    color: 'white'
+                                  }}
+                                >
+                                  {trade.trade_type}
+                                </Box>
+                              </td>
+                              <td style={{ padding: '12px 16px' }}>
+                                <Box
+                                  component="span"
+                                  sx={{
+                                    px: 1,
+                                    py: 0.5,
+                                    borderRadius: 1,
+                                    fontSize: '0.875rem',
+                                    bgcolor: trade.is_open ? 'success.light' : 'text.disabled',
+                                    color: 'white'
+                                  }}
+                                >
+                                  {trade.is_open ? 'OPEN' : 'CLOSED'}
+                                </Box>
+                              </td>
+                              <td style={{ padding: '12px 16px', color: '#666' }}>
+                                {new Date(trade.order_timestamp).toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </Box>
+                  )}
+                </Grid>
+              </Grid>
+            </CustomTabPanel>
+
+            {/* Simulated Trades Tab */}
+            <CustomTabPanel value={tabValue} index={1}>
+              <Grid container spacing={2}>
+                {/* Simulated Trade Summary */}
+                <Grid item xs={12}>
+                  <Paper sx={{ p: 2, bgcolor: 'background.default' }}>
+                    <Typography variant="h6" gutterBottom>Simulated Trade Summary</Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Total Trades</Typography>
+                        <Typography variant="h6">{simulatedTradeSummary.total_trades}</Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Win Rate</Typography>
+                        <Typography variant="h6">{simulatedTradeSummary.total_pnl_percentage.toFixed(2)}%</Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Total P&L</Typography>
+                        <Typography variant="h6" color={simulatedTradeSummary.total_pnl >= 0 ? 'success.main' : 'error.main'}>
+                          ₹{simulatedTradeSummary.total_pnl.toFixed(2)}
+                        </Typography>
+                      </Grid>
+                      <Grid item xs={6} sm={3}>
+                        <Typography variant="body2" color="text.secondary">Auto Trades</Typography>
+                        <Typography variant="h6">{simulatedTradeSummary.auto_trades}</Typography>
+                      </Grid>
+                    </Grid>
+                  </Paper>
+                </Grid>
+
+                {/* Simulated Trades List */}
+                <Grid item xs={12}>
+                  <Box sx={{ overflowX: 'auto' }}>
+                    <Table>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Symbol</TableCell>
+                          <TableCell>Type</TableCell>
+                          <TableCell>Quantity</TableCell>
+                          <TableCell>Entry Price</TableCell>
+                          <TableCell>Exit Price</TableCell>
+                          <TableCell>P&L</TableCell>
+                          <TableCell>P&L %</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {simulatedTrades.map((trade) => (
+                          <TableRow key={trade.order_id}>
+                            <TableCell>{trade.tradingsymbol}</TableCell>
+                            <TableCell>{trade.transaction_type}</TableCell>
+                            <TableCell>{trade.quantity}</TableCell>
+                            <TableCell>₹{trade.average_price.toFixed(2)}</TableCell>
+                            <TableCell>₹{trade.ltp.toFixed(2)}</TableCell>
+                            <TableCell>
+                              <Typography color={trade.pnl >= 0 ? 'success.main' : 'error.main'}>
+                                ₹{trade.pnl.toFixed(2)}
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Typography color={trade.pnl_percentage >= 0 ? 'success.main' : 'error.main'}>
+                                {trade.pnl_percentage.toFixed(2)}%
+                              </Typography>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Box>
+                </Grid>
+              </Grid>
+            </CustomTabPanel>
           </Paper>
         </Grid>
       </Grid>
