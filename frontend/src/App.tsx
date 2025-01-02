@@ -1,50 +1,68 @@
-import React, { useEffect } from 'react';
-import { useDispatch } from 'react-redux';
-import { BrowserRouter as Router } from 'react-router-dom';
-import AppRoutes from './AppRoutes.tsx';
-import { loginSuccess, logout } from './store/slices/authSlice';
-import api from './services/api';
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useSelector } from 'react-redux';
+import { RootState } from './store';
+import Layout from './components/Layout';
+import Login from './pages/Login';
+import Callback from './pages/Callback';
+import Dashboard from './pages/Dashboard';
+import Trade from './pages/Trade';
+import Orders from './pages/Orders.tsx';
+import Positions from './pages/Positions.tsx';
+import { ThemeProvider } from '@mui/material/styles';
+import CssBaseline from '@mui/material/CssBaseline';
+import theme from './theme';
+
+// Protected Route wrapper component
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated } = useSelector((state: RootState) => state.auth);
+  
+  if (!isAuthenticated) {
+    return <Navigate to="/" replace />;
+  }
+  
+  return <>{children}</>;
+};
 
 const App: React.FC = () => {
-  const dispatch = useDispatch();
-
-  useEffect(() => {
-    const validateTokens = async () => {
-      const kiteToken = localStorage.getItem('kite_access_token');
-      const jwtToken = localStorage.getItem('jwt_token');
-
-      if (!kiteToken || !jwtToken) {
-        dispatch(logout());
-        return;
-      }
-
-      try {
-        // Validate tokens with backend
-        const response = await api.get('/auth/validate');
-        if (response.data.valid) {
-          dispatch(loginSuccess({
-            accessToken: kiteToken,
-            token: jwtToken
-          }));
-        } else {
-          // Clear invalid tokens
-          localStorage.removeItem('kite_access_token');
-          localStorage.removeItem('jwt_token');
-          localStorage.removeItem('last_login');
-          dispatch(logout());
-        }
-      } catch {
-        dispatch(logout());
-      }
-    };
-
-    validateTokens();
-  }, [dispatch]);
-
   return (
-    <Router>
-      <AppRoutes />
-    </Router>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <BrowserRouter>
+        <Layout>
+          <Routes>
+            {/* Public routes */}
+            <Route path="/" element={<Login />} />
+            <Route path="/callback" element={<Callback />} />
+
+            {/* Protected routes */}
+            <Route path="/dashboard" element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            } />
+            <Route path="/trade" element={
+              <ProtectedRoute>
+                <Trade />
+              </ProtectedRoute>
+            } />
+            <Route path="/orders" element={
+              <ProtectedRoute>
+                <Orders />
+              </ProtectedRoute>
+            } />
+            <Route path="/positions" element={
+              <ProtectedRoute>
+                <Positions />
+              </ProtectedRoute>
+            } />
+
+            {/* Catch all route - redirect to home */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Layout>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 };
 

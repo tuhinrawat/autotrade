@@ -13,13 +13,37 @@ class KiteService {
 
   async generateSession(requestToken, apiSecret) {
     try {
+      console.log('Attempting to generate session with:', {
+        hasRequestToken: !!requestToken,
+        requestTokenLength: requestToken?.length,
+        hasApiSecret: !!apiSecret,
+        apiSecretLength: apiSecret?.length
+      });
+      
       const session = await this.kite.generateSession(requestToken, apiSecret);
+      console.log('Raw session response:', session);
+      
+      if (!session || !session.access_token) {
+        return {
+          success: false,
+          error: 'No access token in response'
+        };
+      }
+
+      // Set the access token for subsequent requests
+      this.setAccessToken(session.access_token);
+      
       return {
         success: true,
         data: session
       };
     } catch (error) {
-      console.error('Session generation error:', error);
+      console.error('Session generation error details:', {
+        message: error.message,
+        code: error.code,
+        status: error.status,
+        body: error.response?.body
+      });
       return {
         success: false,
         error: error.message
@@ -164,6 +188,28 @@ class KiteService {
       };
     } catch (error) {
       console.error('Order cancellation error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  async getTicks(tokens) {
+    try {
+      const quotes = await this.kite.getQuote(tokens);
+      const ticks = Object.entries(quotes).map(([token, quote]) => ({
+        instrument_token: parseInt(token),
+        last_price: quote.last_price,
+        volume: quote.volume,
+        change: quote.net_change
+      }));
+      return {
+        success: true,
+        data: ticks
+      };
+    } catch (error) {
+      console.error('Ticks fetch error:', error);
       return {
         success: false,
         error: error.message

@@ -13,36 +13,26 @@ const userSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  kiteUserId: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  kiteAccessToken: {
+    type: String
+  },
   role: {
     type: String,
     enum: ['user', 'admin'],
     default: 'user'
   },
-  kiteUserId: {
-    type: String,
-    unique: true,
-    sparse: true
-  },
-  kiteAccessToken: {
-    type: String
-  },
   balance: {
     type: Number,
     default: 0
   },
-  preferences: {
-    theme: {
-      type: String,
-      enum: ['light', 'dark'],
-      default: 'light'
-    },
-    notifications: {
-      type: Boolean,
-      default: true
-    }
-  },
   lastLogin: {
-    type: Date
+    type: Date,
+    default: Date.now
   },
   createdAt: {
     type: Date,
@@ -56,27 +46,22 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
   toJSON: {
     transform: function(doc, ret) {
-      ret.id = ret._id;
       delete ret.__v;
-      delete ret.kiteAccessToken; // Don't send sensitive data
+      delete ret.kiteAccessToken;
       return ret;
     }
   }
 });
 
-// Update lastLogin on token update
-userSchema.pre('findOneAndUpdate', function(next) {
-  if (this._update.kiteAccessToken) {
-    this._update.lastLogin = new Date();
-  }
+// Update timestamps on save
+userSchema.pre('save', function(next) {
+  this.updatedAt = new Date();
   next();
 });
 
-// Ensure email is lowercase before saving
-userSchema.pre('save', function(next) {
-  if (this.email) {
-    this.email = this.email.toLowerCase();
-  }
+// Update timestamps on update
+userSchema.pre('findOneAndUpdate', function(next) {
+  this._update.updatedAt = new Date();
   next();
 });
 

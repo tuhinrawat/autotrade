@@ -40,15 +40,16 @@ const api = axios.create({
   },
 });
 
-// Add request interceptor to include auth tokens
+// Add request interceptor to add auth token
 api.interceptors.request.use(
   (config) => {
-    const jwtToken = localStorage.getItem('jwt_token');
-    const kiteToken = localStorage.getItem('kite_access_token');
-
-    if (jwtToken) {
-      config.headers['Authorization'] = `Bearer ${jwtToken}`;
+    const token = localStorage.getItem('jwt_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
     }
+    
+    // Add Kite access token if available
+    const kiteToken = localStorage.getItem('kite_access_token');
     if (kiteToken) {
       config.headers['X-Kite-Access-Token'] = kiteToken;
     }
@@ -61,24 +62,17 @@ api.interceptors.request.use(
   }
 );
 
-// Add response interceptor for error handling
+// Add response interceptor to handle auth errors
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    console.error('API Error:', {
-      status: error.response?.status,
-      data: error.response?.data,
-      config: error.config
-    });
-
     if (error.response?.status === 401) {
-      // Clear tokens on unauthorized
+      console.log('Unauthorized request, clearing tokens...');
       localStorage.removeItem('jwt_token');
       localStorage.removeItem('kite_access_token');
       localStorage.removeItem('last_login');
       window.location.href = '/login';
     }
-
     return Promise.reject(error);
   }
 );

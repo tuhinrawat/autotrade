@@ -1,115 +1,155 @@
-import { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
+import { loginStart, loginFailure } from '../store/slices/authSlice';
+import { auth } from '../services/auth';
+import { AUTH_CONFIG } from '../config/auth';
+import { RootState } from '../store';
 import {
-  Container,
   Box,
-  Typography,
-  TextField,
   Button,
+  Card,
+  CardContent,
+  TextField,
+  Typography,
+  CircularProgress,
+  Collapse,
   Alert,
+  IconButton
 } from '@mui/material';
-import { loginStart } from '../store/slices/authSlice.ts';
-import { RootState } from '../store/index.ts';
-import { auth } from '../services/api';
+import { ExpandMore, Close } from '@mui/icons-material';
 
-const Login = () => {
+const Login: React.FC = () => {
+  const navigate = useNavigate();
   const dispatch = useDispatch();
-  const { loading, error } = useSelector((state: RootState) => state.auth);
-  const [formData, setFormData] = useState({
+  const { isAuthenticated } = useSelector((state: RootState) => state.auth);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [credentials, setCredentials] = useState({
     apiKey: '',
-    apiSecret: '',
+    apiSecret: ''
   });
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value,
-    });
-  };
+  useEffect(() => {
+    // If already authenticated, redirect to dashboard
+    if (isAuthenticated) {
+      navigate(AUTH_CONFIG.REDIRECT_URLS.AFTER_LOGIN, { replace: true });
+      return;
+    }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+    // Check if we have default credentials
+    const hasDefaultCredentials = AUTH_CONFIG.DEFAULT_API_KEY && AUTH_CONFIG.DEFAULT_API_SECRET;
+    if (!hasDefaultCredentials) {
+      setShowManualInput(true);
+    }
+  }, [isAuthenticated, navigate]);
+
+  const handleLogin = async () => {
     try {
+      setLoading(true);
+      setError(null);
       dispatch(loginStart());
-      
-      // Store credentials temporarily
-      localStorage.setItem('temp_api_key', formData.apiKey);
-      localStorage.setItem('temp_api_secret', formData.apiSecret);
 
-      // Get login URL from backend
+      // If using manual input, set the credentials
+      if (showManualInput) {
+        if (!credentials.apiKey || !credentials.apiSecret) {
+          throw new Error('Please enter both API Key and API Secret');
+        }
+        auth.setCredentials(credentials);
+      }
+
+      // Get login URL and redirect
       const { loginUrl } = await auth.login();
-      
-      // Redirect to Kite login
       window.location.href = loginUrl;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Login error:', error);
-      // No need to dispatch loginFailure as the error will be handled by the API interceptor
+      setError(error.message || 'Failed to initiate login');
+      dispatch(loginFailure(error.message));
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <Container component="main" maxWidth="xs">
-      <Box
-        sx={{
-          marginTop: 8,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-        }}
-      >
-        <Typography component="h1" variant="h5">
-          Sign in with Kite
-        </Typography>
-
-        {error && (
-          <Alert severity="error" sx={{ mt: 2, width: '100%' }}>
-            {error}
-          </Alert>
-        )}
-
-        <Box component="form" onSubmit={handleSubmit} sx={{ mt: 1 }}>
-          <TextField
-            margin="normal"
-            required
-            fullWidth
-            id="apiKey"
-            label="API Key"
-            name="apiKey"
-            autoComplete="off"
-            autoFocus
-            value={formData.apiKey}
-            onChange={handleChange}
-          />
-          <TextField
-            margin="normal"
-            required
-            fullWidth
-            name="apiSecret"
-            label="API Secret"
-            type="password"
-            id="apiSecret"
-            autoComplete="off"
-            value={formData.apiSecret}
-            onChange={handleChange}
-          />
-          <Button
-            type="submit"
-            fullWidth
-            variant="contained"
-            sx={{ mt: 3, mb: 2 }}
-            disabled={loading}
-          >
-            {loading ? 'Connecting to Kite...' : 'Connect to Kite'}
-          </Button>
-          <Typography variant="body2" color="text.secondary" align="center">
-            Get your API credentials from the{' '}
-            <a href="https://kite.trade/connect/login" target="_blank" rel="noopener noreferrer">
-              Kite Connect Developer Console
-            </a>
+    <Box
+      sx={{
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        bgcolor: 'background.default'
+      }}
+    >
+      <Card sx={{ maxWidth: 400, width: '100%', mx: 2 }}>
+        <CardContent>
+          <Typography variant="h5" component="h1" gutterBottom align="center">
+            Login with Zerodha
           </Typography>
-        </Box>
-      </Box>
-    </Container>
+
+          {error && (
+            <Alert 
+              severity="error" 
+              sx={{ mb: 2 }}
+              action={
+                <IconButton size="small" onClick={() => setError(null)}>
+                  <Close fontSize="small" />
+                </IconButton>
+              }
+            >
+              {error}
+            </Alert>
+          )}
+
+          <Box sx={{ mb: 2 }}>
+            <Button
+              variant="text"
+              endIcon={<ExpandMore />}
+              onClick={() => setShowManualInput(!showManualInput)}
+              sx={{ mb: 1 }}
+            >
+              {showManualInput ? 'Hide API Credentials' : 'Enter API Credentials'}
+            </Button>
+
+            <Collapse in={showManualInput}>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <TextField
+                  label="API Key"
+                  value={credentials.apiKey}
+                  onChange={(e) => setCredentials(prev => ({ ...prev, apiKey: e.target.value }))}
+                  fullWidth
+                />
+                <TextField
+                  label="API Secret"
+                  type="password"
+                  value={credentials.apiSecret}
+                  onChange={(e) => setCredentials(prev => ({ ...prev, apiSecret: e.target.value }))}
+                  fullWidth
+                />
+              </Box>
+            </Collapse>
+          </Box>
+
+          <Button
+            variant="contained"
+            color="primary"
+            fullWidth
+            size="large"
+            onClick={handleLogin}
+            disabled={loading || (showManualInput && (!credentials.apiKey || !credentials.apiSecret))}
+          >
+            {loading ? <CircularProgress size={24} /> : 'Login with Zerodha'}
+          </Button>
+
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 2, textAlign: 'center' }}>
+            {showManualInput ? 
+              'Enter your Zerodha API credentials to continue' :
+              'Click to login with your Zerodha account'
+            }
+          </Typography>
+        </CardContent>
+      </Card>
+    </Box>
   );
 };
 

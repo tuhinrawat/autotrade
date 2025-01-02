@@ -1,91 +1,40 @@
 const { AppError } = require('./error');
 const UserService = require('../services/user.service');
 const config = require('../config');
+const logger = require('../utils/logger');
 
 const userService = new UserService(config.jwtSecret);
 
 const protect = async (req, res, next) => {
   try {
-    console.log('Authenticating request...');
-    
-    // 1) Getting token and check if it exists
+    // Get token from header
     const authHeader = req.headers.authorization;
-    let token;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.split(' ')[1];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new AppError('No token provided', 401);
     }
 
-    console.log('Token check:', {
-      hasAuthHeader: !!authHeader,
-      hasToken: !!token
-    });
-
-    if (!token) {
-      return next(new AppError('You are not logged in! Please log in to get access.', 401));
-    }
-
-    // 2) Verification token
-    console.log('Verifying token...');
-    const decoded = await userService.verifyToken(token);
-    console.log('Token verification result:', {
-      success: decoded.success,
-      error: decoded.error,
-      payload: decoded.success ? decoded.data : null
-    });
-
-    if (!decoded.success) {
-      return next(new AppError('Invalid token: ' + decoded.error, 401));
-    }
-
-    // 3) Check if user still exists
-    console.log('Finding user by ID:', decoded.data.userId);
-    const currentUser = await userService.findUserById(decoded.data.userId);
-    console.log('User lookup result:', {
-      success: currentUser.success,
-      userFound: !!currentUser.data,
-      error: currentUser.error
-    });
-
-    if (!currentUser.success || !currentUser.data) {
-      return next(new AppError('The user belonging to this token no longer exists.', 401));
-    }
-
-    // 4) Check if user has a valid Kite token
-    console.log('Checking Kite token:', {
-      hasKiteToken: !!currentUser.data.kiteAccessToken
-    });
-
-    if (!currentUser.data.kiteAccessToken) {
-      return next(new AppError('No Kite access token found. Please login again.', 401));
-    }
-
-    // Validate user object has required fields
-    const requiredFields = ['_id', 'email', 'name', 'role', 'kiteUserId'];
-    const missingFields = requiredFields.filter(field => !currentUser.data[field]);
+    const token = authHeader.split(' ')[1];
     
-    console.log('User data validation:', {
-      hasAllFields: missingFields.length === 0,
-      missingFields
-    });
-
-    if (missingFields.length > 0) {
-      console.warn('User data is incomplete:', {
-        userId: currentUser.data._id,
-        missingFields
-      });
+    // Verify token
+    const verifyResponse = userService.verifyToken(token);
+    if (!verifyResponse.success) {
+      throw new AppError('Invalid token', 401);
     }
 
-    // GRANT ACCESS TO PROTECTED ROUTE
-    req.user = currentUser.data;
-    console.log('Authentication successful for user:', {
-      userId: req.user._id,
-      email: req.user.email
-    });
+    // Get user from token
+    const decoded = verifyResponse.data;
+    const userResponse = await userService.findUserById(decoded.userId);
+    
+    if (!userResponse.success || !userResponse.data) {
+      throw new AppError('User not found', 404);
+    }
 
+    // Add user to request
+    req.user = userResponse.data;
     next();
   } catch (error) {
-    console.error('Authentication error:', error);
-    next(error);
+    logger.error('Auth middleware error:', error);
+    res.status(error.statusCode || 401).json({ error: error.message });
   }
 };
 

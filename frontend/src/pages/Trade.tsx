@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
 import { RootState } from '../store';
@@ -85,7 +85,6 @@ const Trade: React.FC = () => {
   const { isAuthenticated, loading: authLoading } = useSelector((state: RootState) => state.auth);
   const [error, setError] = useState<string | null>(null);
   const [activeTrades, setActiveTrades] = useState<Trade[]>([]);
-  const [ws, setWs] = useState<WebSocket | null>(null);
   const [loading, setLoading] = useState(true);
   const [instrumentTokens, setInstrumentTokens] = useState<number[]>([]);
   const [tradeSummary, setTradeSummary] = useState<TradeSummary>({
@@ -97,6 +96,15 @@ const Trade: React.FC = () => {
     total_pnl: 0,
     total_pnl_percentage: 0
   });
+
+  // WebSocket connection state
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [reconnectTimeout, setReconnectTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const [wsError, setWsError] = useState<string | null>(null);
+  const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
+  const RECONNECT_DELAY = 5000;
+  const wsRef = useRef<WebSocket | null>(null);
 
   // Manual trading state
   const [orderParams, setOrderParams] = useState<OrderParams>({
@@ -374,16 +382,93 @@ const Trade: React.FC = () => {
   // WebSocket message handler
   const handleWebSocketMessage = useCallback((event: MessageEvent) => {
     try {
-      const data = JSON.parse(event.data);
-      console.log('WebSocket message received:', data);
-      
-      if (!data || typeof data !== 'object') {
-        console.warn('Invalid WebSocket message format:', data);
+      // Handle binary data from Kite
+      if (event.data instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const buffer = reader.result as ArrayBuffer;
+          console.log('Received binary data of size:', buffer.byteLength, 'bytes');
+          
+          // If buffer is too small, it might be a heartbeat
+          if (buffer.byteLength <= 2) {
+            console.log('Received heartbeat or empty message');
+            return;
+          }
+
+          const dataView = new DataView(buffer);
+          
+          try {
+            // First two bytes: number of packets
+            const numberOfPackets = dataView.getInt16(0);
+            console.log('Number of packets:', numberOfPackets);
+            
+            if (numberOfPackets <= 0 || numberOfPackets > 100) {
+              console.warn('Invalid number of packets:', numberOfPackets);
+              return;
+            }
+
+            let offset = 2; // Start after number of packets
+            
+            for (let i = 0; i < numberOfPackets; i++) {
+              if (offset + 2 > buffer.byteLength) {
+                console.warn('Buffer overflow prevented at packet length read');
+                break;
+              }
+
+              // Next two bytes: packet length
+              const packetLength = dataView.getInt16(offset);
+              console.log(`Packet ${i + 1} length:`, packetLength);
+              
+              if (packetLength <= 0 || offset + 2 + packetLength > buffer.byteLength) {
+                console.warn('Invalid packet length or buffer overflow prevented');
+                break;
+              }
+
+              offset += 2;
+              
+              // Parse the packet
+              const packet = {
+                instrument_token: dataView.getInt32(offset),
+                last_price: dataView.getInt32(offset + 4) / 100,
+                last_quantity: dataView.getInt32(offset + 8),
+                average_price: dataView.getInt32(offset + 12) / 100,
+                volume: dataView.getInt32(offset + 16),
+                buy_quantity: dataView.getInt32(offset + 20),
+                sell_quantity: dataView.getInt32(offset + 24),
+                change: 0
+              };
+              
+              console.log('Parsed packet:', packet);
+              
+              // Move offset to next packet
+              offset += packetLength;
+              
+              // Update trades with the packet data
+              updateTrades([{
+                instrument_token: packet.instrument_token,
+                last_price: packet.last_price,
+                volume: packet.volume,
+                change: packet.change
+              }]);
+            }
+          } catch (error) {
+            console.error('Error parsing binary data:', error);
+            // Log the buffer content for debugging
+            const arr = new Uint8Array(buffer);
+            console.log('Buffer content:', Array.from(arr));
+          }
+        };
+        reader.readAsArrayBuffer(event.data);
         return;
       }
 
-      if (data.type === 'tick' && Array.isArray(data.ticks) && data.ticks.length > 0) {
-        updateTrades(data.ticks);
+      // Handle text messages (like connection status)
+      const data = JSON.parse(event.data);
+      if (data.type === 'error') {
+        console.error('WebSocket error message:', data);
+        setWsError(data.data || 'Unknown WebSocket error');
+      } else {
+        console.log('WebSocket message received:', data);
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);
@@ -391,94 +476,136 @@ const Trade: React.FC = () => {
   }, [updateTrades]);
 
   // Connect WebSocket
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [reconnectTimeout, setReconnectTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
-  const [wsError, setWsError] = useState<string | null>(null);
-
   const connectWebSocket = useCallback(() => {
-    if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING || isConnecting) {
-      console.log('WebSocket already connected or connecting, skipping...');
+    if (!isAuthenticated) {
+      console.log('Not authenticated, skipping WebSocket connection');
       return;
     }
 
-    // Don't try to connect if not authenticated
-    if (!isAuthenticated) {
-      console.log('Not authenticated, skipping WebSocket connection');
+    if (wsRef.current) {
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        console.log('WebSocket already connected, skipping...');
+        return;
+      }
+      // Close existing connection if not in OPEN state
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    if (isConnecting) {
+      console.log('Connection already in progress, skipping...');
+      return;
+    }
+
+    if (connectionAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.log('Max reconnection attempts reached');
+      setWsError('Unable to establish connection. Please refresh the page.');
       return;
     }
 
     setIsConnecting(true);
     setWsError(null);
 
-    const kiteToken = localStorage.getItem('kite_access_token');
-    if (!kiteToken) {
-      console.error('No Kite access token found');
-      setWsError('No Kite access token found. Please login again.');
-      setIsConnecting(false);
-      return;  // Don't navigate to login, let the auth check handle it
-    }
-
     try {
-      console.log('Connecting to WebSocket...');
-      const socket = new WebSocket(`ws://localhost:8000/ws?token=${kiteToken}`);
+      const kiteToken = localStorage.getItem('kite_access_token');
+      const jwtToken = localStorage.getItem('jwt_token');
+
+      if (!kiteToken || !jwtToken) {
+        throw new Error('Missing authentication tokens');
+      }
+
+      // Use the backend WebSocket URL
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+      console.log('Connecting to WebSocket server:', `${wsUrl}/ws`);
       
+      const socket = new WebSocket(`${wsUrl}/ws?token=${kiteToken}&jwt=${jwtToken}`);
+
       socket.onopen = () => {
-        console.log('WebSocket connected');
-        setWs(socket);
+        console.log('WebSocket connected successfully');
+        wsRef.current = socket;
         setIsConnecting(false);
         setWsError(null);
-        // Subscribe to instrument tokens only if we have any
+        setConnectionAttempts(0);
+
+        // Subscribe to instruments if available
         if (instrumentTokens.length > 0) {
-          console.log('Subscribing to tokens:', instrumentTokens);
-          socket.send(JSON.stringify({
+          console.log('Subscribing to instruments:', instrumentTokens);
+          const subscribeMsg = {
             type: 'subscribe',
             tokens: instrumentTokens
-          }));
+          };
+          socket.send(JSON.stringify(subscribeMsg));
         }
       };
 
       socket.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
-        setWs(null);
+        console.log('WebSocket connection closed:', event.code, event.reason);
+        if (wsRef.current === socket) {
+          wsRef.current = null;
+        }
         setIsConnecting(false);
-        
-        // Only attempt to reconnect if we're still authenticated and it wasn't a clean close
-        if (isAuthenticated && event.code !== 1000 && event.code !== 1008) {
-          // Clear any existing reconnect timeout
+
+        // Attempt to reconnect unless it was a clean close
+        if (event.code !== 1000) {
           if (reconnectTimeout) {
             clearTimeout(reconnectTimeout);
           }
-          // Attempt to reconnect after 5 seconds
+          setConnectionAttempts(prev => prev + 1);
           const timeout = setTimeout(() => {
             console.log('Attempting to reconnect...');
             connectWebSocket();
-          }, 5000);
+          }, RECONNECT_DELAY);
           setReconnectTimeout(timeout);
         }
       };
 
       socket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setWsError('WebSocket connection error. Please try refreshing the page.');
+        console.error('WebSocket error occurred:', error);
+        setWsError('Connection error occurred. Will attempt to reconnect...');
         setIsConnecting(false);
       };
 
       socket.onmessage = handleWebSocketMessage;
+
     } catch (error) {
-      console.error('Error creating WebSocket:', error);
-      setWsError('Failed to create WebSocket connection');
+      console.error('Error setting up WebSocket:', error);
+      setWsError(error instanceof Error ? error.message : 'Failed to create WebSocket connection');
       setIsConnecting(false);
+      
+      // Attempt to reconnect after error
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      setConnectionAttempts(prev => prev + 1);
+      const timeout = setTimeout(() => {
+        console.log('Attempting to reconnect after error...');
+        connectWebSocket();
+      }, RECONNECT_DELAY);
+      setReconnectTimeout(timeout);
     }
-  }, [ws, instrumentTokens, isAuthenticated, handleWebSocketMessage, isConnecting, reconnectTimeout]);
+  }, [instrumentTokens, isAuthenticated, handleWebSocketMessage, isConnecting, reconnectTimeout, connectionAttempts]);
 
   // Connect WebSocket when component mounts or auth changes
   useEffect(() => {
     let mounted = true;
+    let connectTimeoutId: ReturnType<typeof setTimeout>;
 
     const connect = async () => {
-      if (isAuthenticated && mounted && !ws && !isConnecting) {
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Add delay before connecting
-        connectWebSocket();
+      if (!mounted || !isAuthenticated) {
+        return;
+      }
+
+      try {
+        // Add a small delay before connecting to avoid rapid reconnections
+        await new Promise(resolve => {
+          connectTimeoutId = setTimeout(resolve, 1000);
+        });
+        
+        if (mounted && isAuthenticated) {
+          connectWebSocket();
+        }
+      } catch (error) {
+        console.error('Connection setup error:', error);
       }
     };
 
@@ -486,27 +613,35 @@ const Trade: React.FC = () => {
 
     return () => {
       mounted = false;
-      if (ws) {
+      if (connectTimeoutId) {
+        clearTimeout(connectTimeoutId);
+      }
+      if (wsRef.current) {
         console.log('Closing WebSocket connection...');
-        ws.close(1000, 'Component unmounting');
-        setWs(null);
+        const socket = wsRef.current;
+        wsRef.current = null;
+        socket.close(1000, 'Component unmounting');
       }
       if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
       }
       setIsConnecting(false);
+      setConnectionAttempts(0);
     };
-  }, [isAuthenticated, ws, connectWebSocket, isConnecting, reconnectTimeout]);
+  }, [isAuthenticated, connectWebSocket, reconnectTimeout]);
 
   // Update WebSocket subscription when instrument tokens change
   useEffect(() => {
-    if (ws?.readyState === WebSocket.OPEN && instrumentTokens.length > 0) {
-      ws.send(JSON.stringify({
+    const socket = wsRef.current;
+    if (socket?.readyState === WebSocket.OPEN && instrumentTokens.length > 0) {
+      const subscribeMessage = {
         type: 'subscribe',
         tokens: instrumentTokens
-      }));
+      };
+      console.log('Sending subscription:', subscribeMessage);
+      socket.send(JSON.stringify(subscribeMessage));
     }
-  }, [ws, instrumentTokens]);
+  }, [instrumentTokens]);
 
   // Load trades on mount and authentication change
   useEffect(() => {

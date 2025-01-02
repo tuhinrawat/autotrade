@@ -55,79 +55,71 @@ class UserService {
     }
   }
 
-  async updateUser(userId, updateData) {
+  async updateUser(userId, updates) {
     try {
+      if (updates.kiteAccessToken) {
+        updates.lastLogin = new Date();
+      }
+
       const user = await User.findByIdAndUpdate(
         userId,
-        updateData,
+        { ...updates, updatedAt: new Date() },
         { new: true, runValidators: true }
       );
-      return {
-        success: true,
-        data: user
-      };
+
+      if (!user) {
+        return { success: false, error: 'User not found' };
+      }
+
+      return { success: true, data: user };
     } catch (error) {
-      console.error('User update error:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      console.error('Error updating user:', error);
+      return { success: false, error: error.message };
     }
   }
 
-  async updateKiteToken(userId, kiteAccessToken) {
-    try {
-      const user = await User.findByIdAndUpdate(
-        userId,
-        { kiteAccessToken },
-        { new: true }
-      );
-      return {
-        success: true,
-        data: user
-      };
-    } catch (error) {
-      console.error('Token update error:', error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
+  async updateKiteToken(userId, token) {
+    return this.updateUser(userId, {
+      kiteAccessToken: token,
+      lastLogin: new Date()
+    });
   }
 
   async clearKiteToken(userId) {
     try {
       const user = await User.findByIdAndUpdate(
         userId,
-        { kiteAccessToken: null },
+        {
+          $unset: { kiteAccessToken: 1 },
+          updatedAt: new Date()
+        },
         { new: true }
       );
-      return {
-        success: true,
-        data: user
-      };
+
+      if (!user) {
+        return { success: false, error: 'User not found' };
+      }
+
+      return { success: true, data: user };
     } catch (error) {
-      console.error('Token clear error:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      console.error('Error clearing Kite token:', error);
+      return { success: false, error: error.message };
     }
   }
 
-  generateToken(payload, expiresIn = '7d') {
+  generateToken(user) {
     try {
-      const token = jwt.sign(payload, this.jwtSecret, { expiresIn });
-      return {
-        success: true,
-        data: token
+      const payload = {
+        id: user._id,
+        email: user.email,
+        role: user.role
       };
+      return jwt.sign(payload, process.env.JWT_SECRET, {
+        expiresIn: '24h'
+      });
     } catch (error) {
-      console.error('Token generation error:', error);
-      return {
-        success: false,
-        error: error.message
-      };
+      logger.error('Token generation error:', error);
+      throw error;
     }
   }
 
@@ -164,6 +156,28 @@ class UserService {
         success: false,
         error: error.message
       };
+    }
+  }
+
+  async createOrUpdateUser(userData) {
+    try {
+      const { email } = userData;
+      let user = await User.findOne({ email });
+      
+      if (user) {
+        // Update existing user
+        Object.assign(user, userData);
+        await user.save();
+      } else {
+        // Create new user
+        user = new User(userData);
+        await user.save();
+      }
+      
+      return user;
+    } catch (error) {
+      console.error('User creation/update error:', error);
+      throw error;
     }
   }
 }
